@@ -1,0 +1,590 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8"/>
+<meta name="viewport" content="width=device-width, initial-scale=1.0"/>
+<title>FireCheck — Team Fire Drill App</title>
+<link href="https://fonts.googleapis.com/css2?family=Space+Mono:wght@400;700&family=Syne:wght@400;600;800&display=swap" rel="stylesheet"/>
+<script src="https://unpkg.com/react@18/umd/react.production.min.js"></script>
+<script src="https://unpkg.com/react-dom@18/umd/react-dom.production.min.js"></script>
+<style>
+*{box-sizing:border-box;margin:0;padding:0}
+body{background:#090909;font-family:'Syne',sans-serif}
+</style>
+</head>
+<body>
+<div id="root"></div>
+<script>
+// ── STORAGE (uses localStorage since this is standalone) ──────────────────────
+const Storage = {
+  get(key) { try { const v=localStorage.getItem(key); return v?JSON.parse(v):null; } catch(e){return null;} },
+  set(key,val) { try { localStorage.setItem(key,JSON.stringify(val)); } catch(e){} },
+};
+
+// ── HELPERS ───────────────────────────────────────────────────────────────────
+function initials(n){ return n.split(" ").map(w=>w[0]).join("").toUpperCase().slice(0,2); }
+function timeAgo(ts){
+  const d=Math.floor((Date.now()-ts)/1000);
+  if(d<10) return "just now"; if(d<60) return d+"s ago";
+  if(d<3600) return Math.floor(d/60)+"m ago"; return Math.floor(d/3600)+"h ago";
+}
+function fmtPhone(raw){
+  const d=raw.replace(/\D/g,"");
+  if(d.length===10) return "+1"+d;
+  if(d.length===11&&d[0]==="1") return "+"+d;
+  return "+"+d;
+}
+function hashPin(pin){
+  let h=0;
+  for(let i=0;i<pin.length;i++) h=(Math.imul(31,h)+pin.charCodeAt(i))|0;
+  return h.toString(36);
+}
+
+const STATUS_META={
+  safe:   {label:"Safe & Outside",  icon:"✅",color:"#22c55e",bg:"rgba(34,197,94,0.12)",  border:"rgba(34,197,94,0.3)"},
+  away:   {label:"Evacuating Now",  icon:"🏃",color:"#f59e0b",bg:"rgba(245,158,11,0.12)", border:"rgba(245,158,11,0.3)"},
+  out:    {label:"Not at Work",     icon:"🏠",color:"#3b82f6",bg:"rgba(59,130,246,0.12)", border:"rgba(59,130,246,0.3)"},
+  nothere:{label:"Unknown",         icon:"❓",color:"#9ca3af",bg:"rgba(107,114,128,0.12)",border:"rgba(107,114,128,0.3)"},
+  waiting:{label:"No Response Yet", icon:"⏳",color:"#4b5563",bg:"rgba(75,85,99,0.08)",  border:"rgba(75,85,99,0.2)"},
+};
+const SORT_ORDER={safe:0,away:1,out:2,nothere:3,waiting:4};
+
+// ── SHARED STATE (BroadcastChannel for same-device tabs + localStorage) ───────
+const BC = typeof BroadcastChannel!=="undefined" ? new BroadcastChannel("firecheck") : null;
+
+function loadShared(){ return Storage.get("firecheck:shared")||{members:[],drillActive:false,drillStartedAt:null,pingedAt:{},pinHash:null}; }
+function saveShared(state){ Storage.set("firecheck:shared",{...state,updatedAt:Date.now()}); if(BC) BC.postMessage("update"); }
+
+// ── AUDIO ─────────────────────────────────────────────────────────────────────
+let audioCtx=null;
+function getCtx(){ if(!audioCtx) audioCtx=new(window.AudioContext||window.webkitAudioContext)(); if(audioCtx.state==="suspended") audioCtx.resume(); return audioCtx; }
+function playAlarm(){
+  try{
+    const c=getCtx();
+    [0,0.55,1.1].forEach(off=>{[0,0.08,0.16].forEach(t=>{
+      const o=c.createOscillator(),g=c.createGain();
+      o.connect(g);g.connect(c.destination);
+      o.frequency.value=t===0.08?1200:880;o.type="square";
+      g.gain.setValueAtTime(0,c.currentTime+off+t);
+      g.gain.linearRampToValueAtTime(0.18,c.currentTime+off+t+0.01);
+      g.gain.linearRampToValueAtTime(0,c.currentTime+off+t+0.07);
+      o.start(c.currentTime+off+t);o.stop(c.currentTime+off+t+0.1);
+    });});
+  }catch(e){}
+}
+function playPing(){
+  try{
+    const c=getCtx(),o=c.createOscillator(),g=c.createGain();
+    o.connect(g);g.connect(c.destination);o.frequency.value=1400;o.type="sine";
+    g.gain.setValueAtTime(0,c.currentTime);
+    g.gain.linearRampToValueAtTime(0.12,c.currentTime+0.01);
+    g.gain.exponentialRampToValueAtTime(0.001,c.currentTime+0.4);
+    o.start(c.currentTime);o.stop(c.currentTime+0.5);
+  }catch(e){}
+}
+function playEnd(){
+  try{
+    const c=getCtx();
+    [0,0.15,0.3].forEach((t,i)=>{
+      const o=c.createOscillator(),g=c.createGain();
+      o.connect(g);g.connect(c.destination);
+      o.frequency.value=[523,659,784][i];o.type="sine";
+      g.gain.setValueAtTime(0,c.currentTime+t);
+      g.gain.linearRampToValueAtTime(0.12,c.currentTime+t+0.02);
+      g.gain.exponentialRampToValueAtTime(0.001,c.currentTime+t+0.3);
+      o.start(c.currentTime+t);o.stop(c.currentTime+t+0.35);
+    });
+  }catch(e){}
+}
+
+// ── SMS ───────────────────────────────────────────────────────────────────────
+async function sendSMS(toNumbers,message,creds){
+  const {accountSid,authToken,fromNumber}=creds;
+  return Promise.allSettled(toNumbers.map(to=>
+    fetch(`https://api.twilio.com/2010-04-01/Accounts/${accountSid}/Messages.json`,{
+      method:"POST",
+      headers:{"Authorization":"Basic "+btoa(accountSid+":"+authToken),"Content-Type":"application/x-www-form-urlencoded"},
+      body:new URLSearchParams({To:to,From:fromNumber,Body:message}).toString(),
+    }).then(r=>r.json())
+  ));
+}
+
+// ── COMPONENTS ────────────────────────────────────────────────────────────────
+const {useState,useEffect,useRef,useCallback}=React;
+
+function Avatar({name,color,bg,size=40}){
+  return React.createElement("div",{style:{width:size,height:size,borderRadius:"50%",background:bg,color,border:"2px solid "+color,display:"flex",alignItems:"center",justifyContent:"center",fontWeight:800,fontSize:size*0.34,flexShrink:0,fontFamily:"'Space Mono',monospace"}},initials(name));
+}
+
+function App(){
+  const [shared,setShared]=useState(loadShared);
+  const [me,setMe]=useState(()=>Storage.get("firecheck:me"));
+  const [nameInput,setNameInput]=useState("");
+  const [roleInput,setRoleInput]=useState("");
+  const [phoneInput,setPhoneInput]=useState("");
+  const [noteInput,setNoteInput]=useState("");
+  const [isCoord,setIsCoord]=useState(false);
+  const [showSetPin,setShowSetPin]=useState(false);
+  const [showUnlock,setShowUnlock]=useState(false);
+  const [newPin,setNewPin]=useState("");
+  const [confirmPin,setConfirmPin]=useState("");
+  const [pinInput,setPinInput]=useState("");
+  const [pinError,setPinError]=useState("");
+  const [showConfig,setShowConfig]=useState(false);
+  const [twSid,setTwSid]=useState(()=>{const c=Storage.get("firecheck:twilio");return c?.accountSid||"";});
+  const [twToken,setTwToken]=useState(()=>{const c=Storage.get("firecheck:twilio");return c?.authToken||"";});
+  const [twFrom,setTwFrom]=useState(()=>{const c=Storage.get("firecheck:twilio");return c?.fromNumber||"";});
+  const [smsLog,setSmsLog]=useState([]);
+  const [sendingCount,setSendingCount]=useState(0);
+  const [alertFlash,setAlertFlash]=useState(false);
+  const [elapsed,setElapsed]=useState("00:00");
+  const [toast,setToast]=useState(null);
+  const [,forceRender]=useState(0);
+  const prevDrillRef=useRef(shared.drillActive);
+  const toastRef=useRef(null);
+
+  // sync shared state
+  const syncShared=useCallback(()=>{
+    const s=loadShared();
+    const wasActive=prevDrillRef.current;
+    const isNow=s.drillActive;
+    if(!wasActive&&isNow){setAlertFlash(true);playAlarm();setTimeout(()=>setAlertFlash(false),3000);}
+    if(wasActive&&!isNow) playEnd();
+    prevDrillRef.current=isNow;
+    setShared(s);
+  },[]);
+
+  useEffect(()=>{
+    const id=setInterval(syncShared,3000);
+    const tk=setInterval(()=>forceRender(n=>n+1),15000);
+    if(BC) BC.onmessage=syncShared;
+    return()=>{clearInterval(id);clearInterval(tk);if(BC) BC.onmessage=null;};
+  },[syncShared]);
+
+  // drill timer
+  useEffect(()=>{
+    if(!shared.drillActive||!shared.drillStartedAt){setElapsed("00:00");return;}
+    const t=setInterval(()=>{
+      const s=Math.floor((Date.now()-shared.drillStartedAt)/1000);
+      setElapsed(String(Math.floor(s/60)).padStart(2,"0")+":"+String(s%60).padStart(2,"0"));
+    },1000);
+    return()=>clearInterval(t);
+  },[shared.drillActive,shared.drillStartedAt]);
+
+  const showToast=useCallback((msg)=>{
+    setToast(msg);clearTimeout(toastRef.current);
+    toastRef.current=setTimeout(()=>setToast(null),3200);
+  },[]);
+
+  const updateShared=useCallback((patch)=>{
+    const next={...loadShared(),...patch};
+    saveShared(next);setShared(next);
+  },[]);
+
+  // join
+  const join=()=>{
+    const name=nameInput.trim();
+    if(!name){showToast("Please enter your name");return;}
+    const user={name,role:roleInput.trim()||"Team Member",phone:phoneInput.trim(),status:"waiting",note:"",ts:Date.now()};
+    setMe(user);Storage.set("firecheck:me",user);
+    const s=loadShared();
+    const cur=s.members||[];
+    const idx=cur.findIndex(m=>m.name===name);
+    if(idx>=0) cur[idx]=user; else cur.unshift(user);
+    updateShared({members:cur});
+    showToast("Welcome, "+name+"! 👋");
+  };
+
+  const setStatus=useCallback((status)=>{
+    if(!me) return;
+    const updated={...me,status,ts:Date.now()};
+    setMe(updated);Storage.set("firecheck:me",updated);
+    const s=loadShared();
+    const cur=(s.members||[]).map(m=>m.name===me.name?updated:m);
+    updateShared({members:cur});
+    showToast(STATUS_META[status].icon+" "+STATUS_META[status].label);
+  },[me,updateShared,showToast]);
+
+  const sendNote=useCallback(()=>{
+    if(!me) return;
+    const updated={...me,note:noteInput.trim(),ts:Date.now()};
+    setMe(updated);Storage.set("firecheck:me",updated);
+    const s=loadShared();
+    const cur=(s.members||[]).map(m=>m.name===me.name?updated:m);
+    updateShared({members:cur});
+    showToast("📝 Note sent");
+  },[me,noteInput,updateShared,showToast]);
+
+  // pin
+  const handleSetPin=()=>{
+    if(newPin.length<4){setPinError("PIN must be at least 4 digits");return;}
+    if(newPin!==confirmPin){setPinError("PINs don't match");return;}
+    const hash=hashPin(newPin);
+    updateShared({pinHash:hash});
+    setIsCoord(true);setShowSetPin(false);setNewPin("");setConfirmPin("");setPinError("");
+    showToast("🔐 PIN set! You are now the coordinator.");
+  };
+  const handleUnlock=()=>{
+    if(hashPin(pinInput)===shared.pinHash){
+      setIsCoord(true);setShowUnlock(false);setPinInput("");setPinError("");
+      showToast("🔓 Coordinator access granted");
+    } else {setPinError("Incorrect PIN");setPinInput("");}
+  };
+
+  // sms blast
+  const blastSMS=useCallback(async(message,targets)=>{
+    if(!twSid||!twToken||!twFrom) return;
+    const withPhone=targets.filter(m=>m.phone);
+    if(!withPhone.length) return;
+    setSendingCount(withPhone.length);
+    const results=await sendSMS(withPhone.map(m=>fmtPhone(m.phone)),message,{accountSid:twSid,authToken:twToken,fromNumber:fmtPhone(twFrom)});
+    setSendingCount(0);
+    const log=withPhone.map((m,i)=>({ts:Date.now(),name:m.name,to:fmtPhone(m.phone),status:results[i].status==="fulfilled"&&!results[i].value?.error_code?"sent":"failed"}));
+    setSmsLog(prev=>[...log,...prev].slice(0,50));
+    const sent=log.filter(l=>l.status==="sent").length;
+    showToast("📱 SMS: "+sent+" sent"+(log.length-sent?" , "+(log.length-sent)+" failed":""));
+  },[twSid,twToken,twFrom,showToast]);
+
+  // drill
+  const startDrill=async()=>{
+    const now=Date.now();
+    const s=loadShared();
+    const cur=(s.members||[]).map(m=>m.name===me?.name?m:{...m,status:"waiting",note:"",ts:now});
+    prevDrillRef.current=false;
+    updateShared({members:cur,drillActive:true,drillStartedAt:now,pingedAt:{}});
+    setAlertFlash(true);playAlarm();setTimeout(()=>setAlertFlash(false),3000);
+    const others=cur.filter(m=>m.name!==me?.name);
+    await blastSMS("🔥 FIRE DRILL STARTED\nReport your status NOW:\n"+window.location.href+"\n\n— FireCheck",others);
+    showToast("🔔 Drill started — SMS sent!");
+  };
+
+  const endDrill=async()=>{
+    const s=loadShared();
+    prevDrillRef.current=true;
+    updateShared({drillActive:false,drillStartedAt:null});
+    playEnd();
+    const others=(s.members||[]).filter(m=>m.name!==me?.name);
+    await blastSMS("✅ Fire drill ended. All clear! — FireCheck",others);
+    showToast("✅ Drill ended — all-clear SMS sent!");
+  };
+
+  const clearAll=()=>{
+    updateShared({members:[],drillActive:false,drillStartedAt:null,pingedAt:{},pinHash:null});
+    setIsCoord(false);
+    showToast("🗑️ Board cleared");
+  };
+
+  const pingMember=async(member)=>{
+    playPing();
+    const now=Date.now();
+    const pings={...(shared.pingedAt||{}),[member.name]:now};
+    updateShared({pingedAt:pings});
+    if(member.phone) await blastSMS("📣 "+member.name+", the coordinator is waiting for your fire drill status!\n"+window.location.href+"\n\n— FireCheck",[member]);
+    showToast("📣 Pinged "+member.name);
+  };
+
+  const stats=(shared.members||[]).reduce((a,m)=>{a[m.status]=(a[m.status]||0)+1;return a;},{});
+  const sorted=[...(shared.members||[])].sort((a,b)=>(SORT_ORDER[a.status]??4)-(SORT_ORDER[b.status]??4));
+  const twilioReady=!!(twSid&&twToken&&twFrom);
+  const pinIsSet=!!shared.pinHash;
+
+  const h=React.createElement;
+
+  return h("div",{className:"root"},
+    alertFlash&&h("div",{className:"flash"}),
+    shared.drillActive&&h("div",{className:"drill-banner"},
+      h("span",null,"🔥"),
+      "FIRE DRILL IN PROGRESS — REPORT YOUR STATUS NOW",
+      h("span",{className:"drill-timer"},elapsed),
+      h("span",null,"🔥")
+    ),
+
+    // SET PIN MODAL
+    showSetPin&&h("div",{className:"overlay",onClick:e=>e.target===e.currentTarget&&setShowSetPin(false)},
+      h("div",{className:"modal"},
+        h("button",{className:"modal-close",onClick:()=>setShowSetPin(false)},"×"),
+        h("h2",null,"🔐 Set Coordinator PIN"),
+        h("p",null,"Choose a PIN only you know. You'll need it to start or end drills."),
+        h("div",{className:"cfg-lbl",style:{marginBottom:6}},"CHOOSE A PIN (min 4 digits)"),
+        h("input",{className:"pin-input",type:"password",inputMode:"numeric",maxLength:8,placeholder:"••••",value:newPin,onChange:e=>setNewPin(e.target.value.replace(/\D/g,"")),onKeyDown:e=>e.key==="Enter"&&document.getElementById("cp2").focus()}),
+        h("div",{className:"cfg-lbl",style:{margin:"12px 0 6px"}},"CONFIRM PIN"),
+        h("input",{id:"cp2",className:"pin-input",type:"password",inputMode:"numeric",maxLength:8,placeholder:"••••",value:confirmPin,onChange:e=>setConfirmPin(e.target.value.replace(/\D/g,"")),onKeyDown:e=>e.key==="Enter"&&handleSetPin()}),
+        h("div",{className:"pin-error"},pinError),
+        h("button",{className:"btn-primary",style:{width:"100%",marginTop:10},onClick:handleSetPin},"Set PIN & Become Coordinator"),
+        h("div",{className:"modal-hint"},"⚠️ Write your PIN down somewhere safe — there is no forgot PIN option.")
+      )
+    ),
+
+    // UNLOCK MODAL
+    showUnlock&&h("div",{className:"overlay",onClick:e=>e.target===e.currentTarget&&(setShowUnlock(false),setPinInput(""),setPinError(""))},
+      h("div",{className:"modal"},
+        h("button",{className:"modal-close",onClick:()=>{setShowUnlock(false);setPinInput("");setPinError("");}},"×"),
+        h("h2",null,"🔓 Coordinator Login"),
+        h("p",null,"Enter your coordinator PIN to unlock drill controls."),
+        h("input",{className:"pin-input",type:"password",inputMode:"numeric",maxLength:8,placeholder:"••••",value:pinInput,onChange:e=>setPinInput(e.target.value.replace(/\D/g,"")),onKeyDown:e=>e.key==="Enter"&&handleUnlock(),autoFocus:true}),
+        h("div",{className:"pin-error"},pinError),
+        h("button",{className:"btn-primary",style:{width:"100%",marginTop:10},onClick:handleUnlock},"Unlock")
+      )
+    ),
+
+    // HEADER
+    h("header",{className:"hdr"},
+      h("div",{className:"logo"},
+        h("span",{className:"flame"},"🔥"),
+        h("h1",null,"Fire",h("span",null,"Check"))
+      ),
+      h("div",{className:"hdr-right"},
+        sendingCount>0
+          ? h("div",{className:"badge",style:{borderColor:"rgba(245,158,11,.4)",color:"#f59e0b",background:"rgba(245,158,11,.08)"}},h("div",{className:"live-dot",style:{background:"#f59e0b"}}),"SENDING "+sendingCount+" SMS…")
+          : h("button",{className:"badge "+(twilioReady?"green":"dim"),onClick:()=>setShowConfig(v=>!v)},twilioReady?[h("div",{key:"d",className:"live-dot"}),"SMS READY"]:"📱 SETUP SMS"),
+        isCoord
+          ? h("button",{className:"badge coord",onClick:()=>{setIsCoord(false);showToast("🔒 Coordinator locked");}},"🔒 Lock Controls")
+          : pinIsSet
+            ? h("button",{className:"badge dim",onClick:()=>{setShowUnlock(true);setPinError("");}},"🔓 Coordinator Login")
+            : h("button",{className:"badge dim",onClick:()=>{setShowSetPin(true);setPinError("");}},"🔐 Setup Coordinator")
+      )
+    ),
+
+    h("main",{className:"main"},
+
+      // TWILIO CONFIG
+      showConfig&&h("div",{className:"config-panel"},
+        h("h3",null,"📱 Twilio SMS Setup"),
+        h("p",null,"Get a free account at twilio.com → grab your Account SID, Auth Token and a phone number. Credentials saved only on your device."),
+        h("div",{className:"cfg-row"},
+          h("div",{className:"cfg-field"},h("div",{className:"cfg-lbl"},"ACCOUNT SID"),h("input",{className:"inp",placeholder:"ACxxxxxxxx",value:twSid,onChange:e=>setTwSid(e.target.value),style:{width:"100%"}})),
+          h("div",{className:"cfg-field"},h("div",{className:"cfg-lbl"},"AUTH TOKEN"),h("input",{className:"inp",type:"password",placeholder:"••••••••",value:twToken,onChange:e=>setTwToken(e.target.value),style:{width:"100%"}}))
+        ),
+        h("div",{className:"cfg-row",style:{gridTemplateColumns:"1fr auto"}},
+          h("div",{className:"cfg-field"},h("div",{className:"cfg-lbl"},"TWILIO PHONE NUMBER"),h("input",{className:"inp",placeholder:"+1 555 000 0000",value:twFrom,onChange:e=>setTwFrom(e.target.value),style:{width:"100%"}})),
+          h("div",{style:{display:"flex",alignItems:"flex-end"}},
+            h("button",{className:"btn-primary",onClick:()=>{Storage.set("firecheck:twilio",{accountSid:twSid,authToken:twToken,fromNumber:fmtPhone(twFrom)});setShowConfig(false);showToast("✅ Twilio saved");}},  "Save")
+          )
+        )
+      ),
+
+      // MY STATUS CARD
+      h("div",{className:"card"},
+        h("div",{className:"lbl"},"// my status"),
+        me&&h("div",{className:"user-row"},
+          h(Avatar,{name:me.name,color:STATUS_META[me.status]?.color||"#555",bg:STATUS_META[me.status]?.bg||"#1a1a1a",size:44}),
+          h("div",{className:"user-info"},
+            h("h2",null,me.name,isCoord&&h("span",{style:{fontSize:12,color:"#fbbf24",marginLeft:8,fontFamily:"'Space Mono',monospace"}},"★ COORD")),
+            h("p",null,me.role)
+          )
+        ),
+        !me
+          ? h("div",null,
+              h("div",{className:"input-row"},
+                h("input",{className:"inp",placeholder:"Your name…",value:nameInput,onChange:e=>setNameInput(e.target.value),onKeyDown:e=>e.key==="Enter"&&join(),maxLength:30}),
+                h("input",{className:"inp",placeholder:"Role / team…",value:roleInput,onChange:e=>setRoleInput(e.target.value),onKeyDown:e=>e.key==="Enter"&&join(),maxLength:40,style:{maxWidth:180}})
+              ),
+              h("div",{className:"input-row"},
+                h("input",{className:"inp",placeholder:"📱 Mobile number for SMS alerts…",value:phoneInput,onChange:e=>setPhoneInput(e.target.value),onKeyDown:e=>e.key==="Enter"&&join(),maxLength:15,type:"tel"}),
+                h("button",{className:"btn-primary",onClick:join},"Join Team")
+              )
+            )
+          : h("div",null,
+              h("div",{className:"status-grid"},
+                [{key:"safe",label:"I'm Safe & Outside",sub:"Evacuated, at muster point"},
+                 {key:"away",label:"Evacuating Now",sub:"Still making my way out"},
+                 {key:"out",label:"Not at Work Today",sub:"WFH, PTO, or off-site"},
+                 {key:"nothere",label:"Can't Respond",sub:"Unsure / phone issue"}
+                ].map(({key,label,sub})=>{
+                  const m=STATUS_META[key],active=me.status===key;
+                  return h("button",{key,className:"s-btn"+(active?" active":""),style:active?{borderColor:m.color,background:m.bg}:{},onClick:()=>setStatus(key)},
+                    h("span",{className:"s-icon"},m.icon),
+                    h("div",null,label,h("span",{className:"s-sub"},sub))
+                  );
+                })
+              ),
+              h("div",{className:"note-row"},
+                h("input",{className:"inp",placeholder:'Optional note… e.g. "At parking lot entrance"',value:noteInput,onChange:e=>setNoteInput(e.target.value),onKeyDown:e=>e.key==="Enter"&&sendNote(),maxLength:80}),
+                h("button",{className:"btn-primary",onClick:sendNote},"Send")
+              )
+            )
+      ),
+
+      // DRILL CONTROLS
+      isCoord
+        ? h("div",{className:"coord-panel"},
+            h("div",{className:"coord-panel-hdr"},
+              h("h3",null,"🎛️ Drill Control ",h("span",{className:"coord-tag"},"COORDINATOR")),
+              h("div",{className:"ctrl-btns"},
+                h("button",{className:"cbtn start",onClick:startDrill},"🔔 Start Drill"),
+                h("button",{className:"cbtn end",onClick:endDrill},"✅ End Drill"),
+                h("button",{className:"cbtn clr",onClick:clearAll},"🗑️ Clear"),
+                h("button",{className:"cbtn lock",onClick:()=>{setIsCoord(false);showToast("🔒 Coordinator locked");}},"🔒 Lock")
+              )
+            ),
+            h("div",{className:"coord-hint"},"Start Drill → SMS sent to all members with phone numbers | End Drill → All-clear SMS sent")
+          )
+        : h("div",{className:"locked-panel"},
+            h("div",{className:"locked-info"},
+              h("h3",null,"🔒 Drill Control"),
+              h("p",null,pinIsSet?"Coordinator login required to start or end a drill":"No coordinator set up yet")
+            ),
+            pinIsSet
+              ? h("button",{className:"cbtn",onClick:()=>{setShowUnlock(true);setPinError("");}},"🔓 Coordinator Login")
+              : h("button",{className:"cbtn start",onClick:()=>{setShowSetPin(true);setPinError("");}},"🔐 Become Coordinator")
+          ),
+
+      // STATS
+      h("div",{className:"stats"},
+        [{key:"safe",color:"#22c55e",label:"SAFE"},
+         {key:"away",color:"#f59e0b",label:"EVACUATING"},
+         {key:"out",color:"#3b82f6",label:"NOT IN"},
+         {key:"waiting",color:"#4b5563",label:"UNKNOWN",extra:"nothere"}
+        ].map(({key,color,label,extra})=>
+          h("div",{key,className:"stat"},
+            h("div",{className:"stat-n",style:{color}},(stats[key]||0)+(extra?stats[extra]||0:0)),
+            h("div",{className:"stat-l"},label)
+          )
+        )
+      ),
+
+      // TEAM LIST
+      h("div",null,
+        h("div",{className:"team-hdr"},
+          h("h3",null,"Team Status"),
+          h("span",{className:"cnt-badge"},(shared.members||[]).length+" member"+((shared.members||[]).length!==1?"s":"")),
+          h("span",{style:{marginLeft:"auto",fontFamily:"'Space Mono',monospace",fontSize:10,color:"#252525"}},"updates every 3s")
+        ),
+        (shared.members||[]).length===0
+          ? h("div",{className:"empty"},h("h3",null,"No team members yet"),h("p",null,"Enter your name above to join. Share this page link with your team."))
+          : sorted.map(member=>{
+              const meta=STATUS_META[member.status]||STATUS_META.waiting;
+              const recentPing=(shared.pingedAt||{})[member.name]&&(Date.now()-(shared.pingedAt||{})[member.name])<12000;
+              const needsPing=isCoord&&(member.status==="waiting"||member.status==="nothere")&&member.name!==me?.name;
+              return h("div",{key:member.name,className:"member",style:recentPing?{borderColor:"rgba(245,158,11,.4)",background:"rgba(245,158,11,.04)"}:{}},
+                h(Avatar,{name:member.name,color:meta.color,bg:meta.bg,size:38}),
+                h("div",{className:"m-info"},
+                  h("h4",null,member.name,me&&member.name===me.name&&h("span",{className:"you-tag"},"(you)")),
+                  h("p",null,member.role),
+                  member.phone&&h("div",{className:"m-phone"},"📱 ",member.phone),
+                  member.note&&h("div",{className:"m-note"},'"',member.note,'"'),
+                  h("div",{className:"m-time"},timeAgo(member.ts))
+                ),
+                h("div",{className:"pill",style:{background:meta.bg,color:meta.color,border:"1px solid "+meta.border}},meta.icon," ",meta.label),
+                needsPing&&h("button",{className:"ping-btn"+(recentPing?" pinged":""),onClick:()=>pingMember(member)},recentPing?"📣 SENT":"📣 PING")
+              );
+            })
+      ),
+
+      // SMS LOG
+      smsLog.length>0&&h("div",{className:"sms-log"},
+        h("h4",null,"📋 SMS Log ",h("span",{style:{fontWeight:400,fontSize:11,color:"#444"}},"— "+smsLog.length+" messages")),
+        smsLog.map((l,i)=>h("div",{key:i,className:"log-entry"},
+          h("span",{className:"log-status "+l.status},l.status==="sent"?"✓ SENT":"✗ FAIL"),
+          h("span",{className:"log-name"},l.name),
+          h("span",{className:"log-num"},l.to),
+          h("span",{className:"log-time"},timeAgo(l.ts))
+        ))
+      )
+    ),
+
+    h("div",{className:"toast"+(toast?" show":"")},toast)
+  );
+}
+
+// ── STYLES ────────────────────────────────────────────────────────────────────
+const style=document.createElement("style");
+style.textContent=`
+.root{min-height:100vh;background:#090909;color:#f0ede8;font-family:'Syne',sans-serif;padding-bottom:80px}
+.flash{position:fixed;inset:0;background:rgba(255,30,0,0.22);z-index:9999;pointer-events:none;animation:flashAnim 3s ease forwards}
+@keyframes flashAnim{0%{opacity:0}8%{opacity:1}30%{opacity:.8}50%{opacity:1}70%{opacity:.6}100%{opacity:0}}
+.drill-banner{background:linear-gradient(90deg,#7f1d1d,#991b1b,#7f1d1d);border-bottom:2px solid #ff4d2e;padding:10px 20px;display:flex;align-items:center;justify-content:center;gap:12px;font-family:'Space Mono',monospace;font-size:12px;font-weight:700;letter-spacing:.12em;color:#fca5a5;animation:bPulse 1.5s ease-in-out infinite alternate;flex-wrap:wrap;text-align:center}
+@keyframes bPulse{from{background:linear-gradient(90deg,#7f1d1d,#991b1b,#7f1d1d)}to{background:linear-gradient(90deg,#991b1b,#b91c1c,#991b1b)}}
+.drill-timer{font-size:16px;color:#fff;background:rgba(0,0,0,.3);padding:2px 10px;border-radius:6px}
+.hdr{max-width:880px;margin:0 auto;padding:26px 20px 0;display:flex;justify-content:space-between;align-items:center;flex-wrap:wrap;gap:10px}
+.logo{display:flex;align-items:center;gap:10px}
+.logo h1{font-size:22px;font-weight:800}.logo h1 span{color:#ff4d2e}
+.flame{font-size:26px;animation:flicker 1.8s ease-in-out infinite alternate;display:inline-block}
+@keyframes flicker{0%{transform:scaleY(1) rotate(-2deg)}50%{transform:scaleY(1.1) rotate(1deg)}100%{transform:scaleY(.95) rotate(2deg)}}
+.hdr-right{display:flex;align-items:center;gap:8px;flex-wrap:wrap}
+.badge{display:flex;align-items:center;gap:6px;padding:6px 12px;border-radius:20px;font-family:'Space Mono',monospace;font-size:10px;font-weight:700;letter-spacing:.06em;cursor:pointer;border:1px solid;transition:all .15s;white-space:nowrap;background:transparent}
+.badge.green{border-color:rgba(34,197,94,.4);color:#22c55e;background:rgba(34,197,94,.08)}
+.badge.dim{border-color:#333;color:#555}.badge.dim:hover{border-color:#555;color:#888}
+.badge.coord{border-color:rgba(251,191,36,.4);color:#fbbf24;background:rgba(251,191,36,.08)}.badge.coord:hover{background:rgba(251,191,36,.12)}
+.live-dot{width:6px;height:6px;background:#22c55e;border-radius:50%;animation:pulse 1.2s infinite;flex-shrink:0}
+@keyframes pulse{0%,100%{opacity:1;transform:scale(1)}50%{opacity:.4;transform:scale(.7)}}
+.overlay{position:fixed;inset:0;background:rgba(0,0,0,.75);z-index:1000;display:flex;align-items:center;justify-content:center;padding:20px}
+.modal{background:#141414;border:1px solid #2a2a2a;border-radius:20px;padding:32px;width:100%;max-width:380px;position:relative}
+.modal h2{font-size:18px;font-weight:800;margin-bottom:6px}
+.modal p{font-size:13px;color:#555;margin-bottom:20px;line-height:1.6}
+.modal-close{position:absolute;top:16px;right:18px;background:none;border:none;color:#444;font-size:20px;cursor:pointer;line-height:1}.modal-close:hover{color:#888}
+.pin-input{width:100%;background:#1a1a1a;border:1.5px solid #252525;border-radius:10px;padding:12px 16px;color:#f0ede8;font-family:'Space Mono',monospace;font-size:20px;letter-spacing:.3em;outline:none;text-align:center;transition:border-color .15s}.pin-input:focus{border-color:#444}
+.pin-error{color:#ef4444;font-size:12px;font-family:'Space Mono',monospace;margin-top:6px;min-height:18px}
+.modal-hint{font-size:11px;color:#333;margin-top:12px;line-height:1.5}
+.main{max-width:880px;margin:0 auto;padding:22px 20px}
+.config-panel{background:#131313;border:1px solid rgba(255,77,46,.2);border-radius:16px;padding:22px;margin-bottom:18px}
+.config-panel h3{font-size:14px;font-weight:800;margin-bottom:4px}
+.config-panel p{font-size:12px;color:#555;margin-bottom:16px;line-height:1.6}
+.cfg-row{display:grid;grid-template-columns:1fr 1fr;gap:10px;margin-bottom:10px}
+.cfg-lbl{font-family:'Space Mono',monospace;font-size:10px;color:#444;letter-spacing:.1em;margin-bottom:5px;display:block}
+.cfg-field{display:flex;flex-direction:column}
+.card{background:#131313;border:1px solid #1e1e1e;border-radius:16px;padding:24px;margin-bottom:18px;position:relative;overflow:hidden}
+.card::before{content:'';position:absolute;inset:0;background:radial-gradient(ellipse at top left,rgba(255,77,46,.04) 0%,transparent 60%);pointer-events:none}
+.lbl{font-family:'Space Mono',monospace;font-size:10px;letter-spacing:.14em;color:#333;text-transform:uppercase;margin-bottom:16px}
+.user-row{display:flex;align-items:center;gap:14px;margin-bottom:20px}
+.user-info h2{font-size:17px;font-weight:800}.user-info p{font-size:12px;color:#555;margin-top:2px}
+.inp{flex:1;min-width:100px;background:#1a1a1a;border:1.5px solid #222;border-radius:10px;padding:10px 14px;color:#f0ede8;font-family:'Syne',sans-serif;font-size:13px;outline:none;transition:border-color .15s;width:100%}
+.inp::placeholder{color:#3a3a3a}.inp:focus{border-color:#3a3a3a}
+.btn-primary{background:#ff4d2e;border:none;border-radius:10px;padding:10px 18px;color:#fff;font-family:'Syne',sans-serif;font-size:13px;font-weight:700;cursor:pointer;transition:opacity .15s;white-space:nowrap}.btn-primary:hover{opacity:.85}
+.input-row{display:flex;gap:8px;flex-wrap:wrap;margin-bottom:8px}
+.status-grid{display:grid;grid-template-columns:1fr 1fr;gap:10px}
+.s-btn{border:1.5px solid #222;background:#1a1a1a;border-radius:12px;padding:13px 15px;cursor:pointer;transition:all .18s;display:flex;align-items:center;gap:11px;color:#f0ede8;font-family:'Syne',sans-serif;font-size:13px;font-weight:600;text-align:left;width:100%}
+.s-btn:hover{border-color:#444;transform:translateY(-1px)}.s-btn.active{transform:translateY(-1px)}
+.s-icon{font-size:20px;flex-shrink:0}
+.s-sub{display:block;font-size:11px;font-weight:400;color:#444;margin-top:2px}
+.note-row{display:flex;gap:8px;margin-top:12px}
+.coord-panel{background:#141414;border:1.5px solid rgba(251,191,36,.2);border-radius:16px;padding:20px 22px;margin-bottom:18px}
+.coord-panel-hdr{display:flex;align-items:center;justify-content:space-between;flex-wrap:wrap;gap:10px;margin-bottom:12px}
+.coord-panel-hdr h3{font-size:15px;font-weight:800;display:flex;align-items:center;gap:8px}
+.coord-tag{font-family:'Space Mono',monospace;font-size:10px;color:#fbbf24;background:rgba(251,191,36,.1);border:1px solid rgba(251,191,36,.25);border-radius:20px;padding:3px 10px;letter-spacing:.08em}
+.coord-hint{font-size:11px;color:#333;font-family:'Space Mono',monospace;line-height:1.6}
+.ctrl-btns{display:flex;gap:8px;flex-wrap:wrap}
+.cbtn{border:1.5px solid #252525;background:#1a1a1a;color:#f0ede8;border-radius:10px;padding:9px 16px;font-family:'Syne',sans-serif;font-size:12px;font-weight:700;cursor:pointer;transition:all .15s}.cbtn:hover{border-color:#555}
+.cbtn.start{background:#ff4d2e;border-color:#ff4d2e;color:#fff}.cbtn.start:hover{opacity:.85}
+.cbtn.end{border-color:#22c55e;color:#22c55e}.cbtn.end:hover{background:rgba(34,197,94,.08)}
+.cbtn.clr{border-color:#ef4444;color:#ef4444}.cbtn.clr:hover{background:rgba(239,68,68,.08)}
+.cbtn.lock{border-color:#fbbf24;color:#fbbf24}.cbtn.lock:hover{background:rgba(251,191,36,.08)}
+.locked-panel{background:#131313;border:1px solid #1e1e1e;border-radius:16px;padding:18px 22px;margin-bottom:18px;display:flex;align-items:center;justify-content:space-between;gap:12px;flex-wrap:wrap}
+.locked-info h3{font-size:14px;font-weight:700;color:#555;display:flex;align-items:center;gap:8px}
+.locked-info p{font-size:12px;color:#333;margin-top:3px}
+.stats{display:grid;grid-template-columns:repeat(4,1fr);gap:10px;margin-bottom:18px}
+.stat{background:#131313;border:1px solid #1e1e1e;border-radius:12px;padding:15px;text-align:center}
+.stat-n{font-size:28px;font-weight:800;font-family:'Space Mono',monospace}
+.stat-l{font-size:10px;color:#333;margin-top:3px;font-family:'Space Mono',monospace;letter-spacing:.08em}
+.team-hdr{display:flex;align-items:center;gap:10px;margin-bottom:14px}
+.team-hdr h3{font-size:16px;font-weight:700}
+.cnt-badge{font-family:'Space Mono',monospace;font-size:11px;color:#444;background:#1a1a1a;border:1px solid #222;border-radius:20px;padding:2px 10px}
+.member{background:#131313;border:1px solid #1e1e1e;border-radius:12px;padding:14px 16px;margin-bottom:8px;display:flex;align-items:center;gap:12px;animation:slideIn .25s ease}
+@keyframes slideIn{from{opacity:0;transform:translateY(5px)}to{opacity:1;transform:translateY(0)}}
+.m-info{flex:1;min-width:0}
+.m-info h4{font-size:14px;font-weight:700}
+.m-info p{font-size:12px;color:#555;margin-top:2px}
+.m-note{font-size:11px;color:#555;margin-top:4px;font-style:italic}
+.m-time{font-family:'Space Mono',monospace;font-size:10px;color:#2a2a2a;margin-top:3px}
+.m-phone{font-family:'Space Mono',monospace;font-size:10px;color:#2e2e2e;margin-top:2px}
+.pill{display:flex;align-items:center;gap:5px;border-radius:20px;padding:4px 11px;font-size:11px;font-weight:700;white-space:nowrap;flex-shrink:0}
+.you-tag{font-size:10px;color:#3a3a3a;margin-left:5px;font-weight:400}
+.ping-btn{border:1px solid #252525;background:transparent;color:#555;border-radius:8px;padding:5px 10px;font-family:'Space Mono',monospace;font-size:10px;cursor:pointer;transition:all .15s;margin-left:4px;flex-shrink:0}.ping-btn:hover{border-color:#ff4d2e;color:#ff4d2e}.ping-btn.pinged{border-color:#f59e0b;color:#f59e0b}
+.empty{background:rgba(107,114,128,.04);border:1px dashed #1e1e1e;border-radius:12px;padding:40px;text-align:center;color:#333}
+.empty h3{font-size:15px;color:#555;margin-bottom:6px}.empty p{font-size:13px}
+.sms-log{background:#0d0d0d;border:1px solid #1a1a1a;border-radius:12px;padding:16px;margin-top:18px}
+.sms-log h4{font-size:13px;font-weight:700;margin-bottom:12px}
+.log-entry{display:flex;align-items:center;gap:10px;padding:8px 0;border-bottom:1px solid #141414;font-size:11px}.log-entry:last-child{border-bottom:none}
+.log-status{font-family:'Space Mono',monospace;font-size:10px;font-weight:700;padding:2px 8px;border-radius:6px}
+.log-status.sent{color:#22c55e;background:rgba(34,197,94,.1)}.log-status.failed{color:#ef4444;background:rgba(239,68,68,.1)}
+.log-name{font-weight:600;flex:1}.log-num{color:#333;font-family:'Space Mono',monospace}.log-time{color:#2a2a2a;font-family:'Space Mono',monospace;font-size:9px}
+.toast{position:fixed;bottom:26px;left:50%;transform:translateX(-50%) translateY(80px);background:#1e1e1e;border:1px solid #2a2a2a;border-radius:12px;padding:11px 20px;font-size:13px;font-weight:600;transition:transform .3s cubic-bezier(.34,1.56,.64,1);z-index:9998;white-space:nowrap;pointer-events:none}
+.toast.show{transform:translateX(-50%) translateY(0)}
+@media(max-width:540px){.stats{grid-template-columns:repeat(2,1fr)}.status-grid{grid-template-columns:1fr}.coord-panel-hdr{flex-direction:column;align-items:flex-start}.cfg-row{grid-template-columns:1fr}.locked-panel{flex-direction:column;align-items:flex-start}}
+`;
+document.head.appendChild(style);
+
+ReactDOM.createRoot(document.getElementById("root")).render(React.createElement(App));
+</script>
+</body>
+</html>
