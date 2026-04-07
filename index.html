@@ -12,18 +12,16 @@
 <body>
 <div id="root"></div>
 <script>
-// ── HARDCODED CONFIG — no setup needed ────────────────────────────────────────
-const JSONBIN_URL = "https://api.jsonbin.io/v3/b";
+// ── HARDCODED CONFIG ──────────────────────────────────────────────────────────
 const BIN_ID  = "69d4529936566621a8867f2e";
 const API_KEY = "$2a$10$bIAm8zuPXIaTWlFc89g7TetTMExFEZ/XgsWRoMSJYDx.h8l87gE2S";
+const APP_URL = "https://mesutgmail.github.io/firecheck";
 
-// ── LOCAL STORAGE ─────────────────────────────────────────────────────────────
+// ── HELPERS ───────────────────────────────────────────────────────────────────
 const LS={
   get(k){try{const v=localStorage.getItem(k);return v?JSON.parse(v):null;}catch(e){return null;}},
   set(k,v){try{localStorage.setItem(k,JSON.stringify(v));}catch(e){}}
 };
-
-// ── HELPERS ───────────────────────────────────────────────────────────────────
 function initials(n){return n.split(" ").map(w=>w[0]).join("").toUpperCase().slice(0,2);}
 function timeAgo(ts){
   const d=Math.floor((Date.now()-ts)/1000);
@@ -38,7 +36,19 @@ function fmtPhone(raw){
   if(raw.startsWith("+"))return raw;
   return"+"+d;
 }
+function fmtDate(ts){
+  if(!ts)return"—";
+  return new Date(ts).toLocaleString("en-US",{month:"short",day:"numeric",year:"numeric",hour:"2-digit",minute:"2-digit"});
+}
 function hashPin(pin){let h=0;for(let i=0;i<pin.length;i++)h=(Math.imul(31,h)+pin.charCodeAt(i))|0;return h.toString(36);}
+
+// get ?name= from URL
+function getUrlName(){
+  try{
+    const p=new URLSearchParams(window.location.search);
+    return p.get("name")||"";
+  }catch(e){return"";}
+}
 
 const STATUS_META={
   safe:   {label:"Safe & Outside", icon:"✅",color:"#22c55e",bg:"rgba(34,197,94,0.12)",  border:"rgba(34,197,94,0.3)"},
@@ -49,17 +59,17 @@ const STATUS_META={
 };
 const SORT_ORDER={safe:0,away:1,out:2,nothere:3,waiting:4};
 
-// ── JSONBIN DB ────────────────────────────────────────────────────────────────
+// ── DB ────────────────────────────────────────────────────────────────────────
 async function dbRead(){
   try{
-    const r=await fetch(JSONBIN_URL+"/"+BIN_ID+"/latest",{headers:{"X-Master-Key":API_KEY}});
+    const r=await fetch("https://api.jsonbin.io/v3/b/"+BIN_ID+"/latest",{headers:{"X-Master-Key":API_KEY}});
     if(!r.ok)return null;
     return(await r.json()).record;
   }catch(e){return null;}
 }
 async function dbWrite(data){
   try{
-    await fetch(JSONBIN_URL+"/"+BIN_ID,{
+    await fetch("https://api.jsonbin.io/v3/b/"+BIN_ID,{
       method:"PUT",
       headers:{"Content-Type":"application/json","X-Master-Key":API_KEY},
       body:JSON.stringify({...data,updatedAt:Date.now()})
@@ -67,7 +77,7 @@ async function dbWrite(data){
   }catch(e){}
 }
 
-// ── TWILIO SMS ────────────────────────────────────────────────────────────────
+// ── SMS ───────────────────────────────────────────────────────────────────────
 async function sendSMS(toNumbers,message,creds){
   const{accountSid,authToken,fromNumber}=creds;
   return Promise.allSettled(toNumbers.map(to=>
@@ -86,7 +96,7 @@ function playAlarm(){try{const c=getCtx();[0,0.55,1.1].forEach(off=>{[0,0.08,0.1
 function playPing(){try{const c=getCtx(),o=c.createOscillator(),g=c.createGain();o.connect(g);g.connect(c.destination);o.frequency.value=1400;o.type="sine";g.gain.setValueAtTime(0,c.currentTime);g.gain.linearRampToValueAtTime(0.12,c.currentTime+0.01);g.gain.exponentialRampToValueAtTime(0.001,c.currentTime+0.4);o.start(c.currentTime);o.stop(c.currentTime+0.5);}catch(e){}}
 function playEnd(){try{const c=getCtx();[0,0.15,0.3].forEach((t,i)=>{const o=c.createOscillator(),g=c.createGain();o.connect(g);g.connect(c.destination);o.frequency.value=[523,659,784][i];o.type="sine";g.gain.setValueAtTime(0,c.currentTime+t);g.gain.linearRampToValueAtTime(0.12,c.currentTime+t+0.02);g.gain.exponentialRampToValueAtTime(0.001,c.currentTime+t+0.3);o.start(c.currentTime+t);o.stop(c.currentTime+t+0.35);});}catch(e){}}
 
-// ── REACT APP ─────────────────────────────────────────────────────────────────
+// ── COMPONENTS ────────────────────────────────────────────────────────────────
 const{useState,useEffect,useRef,useCallback}=React;
 
 function Avatar({name,color,bg,size=40}){
@@ -94,12 +104,21 @@ function Avatar({name,color,bg,size=40}){
 }
 
 function App(){
-  const[shared,setShared]=useState({members:[],drillActive:false,drillStartedAt:null,pingedAt:{},pinHash:null});
-  const[me,setMe]=useState(()=>LS.get("fc:me"));
-  const[nameInput,setNameInput]=useState("");
+  const urlName=getUrlName();
+
+  // core state
+  const[shared,setShared]=useState({members:[],phonebook:[],drillActive:false,drillStartedAt:null,pingedAt:{},pinHash:null,history:[]});
+  const[me,setMe]=useState(()=>{
+    const saved=LS.get("fc:me");
+    if(urlName&&(!saved||saved.name!==urlName)) return null; // force re-join if URL name differs
+    return saved;
+  });
+  const[nameInput,setNameInput]=useState(urlName||"");
   const[roleInput,setRoleInput]=useState("");
   const[phoneInput,setPhoneInput]=useState("");
   const[noteInput,setNoteInput]=useState("");
+
+  // coordinator
   const[isCoord,setIsCoord]=useState(false);
   const[showSetPin,setShowSetPin]=useState(false);
   const[showUnlock,setShowUnlock]=useState(false);
@@ -107,16 +126,29 @@ function App(){
   const[confirmPin,setConfirmPin]=useState("");
   const[pinInput,setPinInput]=useState("");
   const[pinError,setPinError]=useState("");
+
+  // tabs
+  const[activeTab,setActiveTab]=useState("live"); // live | phonebook | history
+
+  // phonebook editor
+  const[pbName,setPbName]=useState("");
+  const[pbRole,setPbRole]=useState("");
+  const[pbPhone,setPbPhone]=useState("");
+
+  // twilio
   const[showConfig,setShowConfig]=useState(false);
   const[twSid,setTwSid]=useState(()=>{const c=LS.get("fc:twilio");return c?.accountSid||"";});
   const[twToken,setTwToken]=useState(()=>{const c=LS.get("fc:twilio");return c?.authToken||"";});
   const[twFrom,setTwFrom]=useState(()=>{const c=LS.get("fc:twilio");return c?.fromNumber||"";});
   const[smsLog,setSmsLog]=useState([]);
   const[sendingCount,setSendingCount]=useState(0);
+
+  // ui
   const[alertFlash,setAlertFlash]=useState(false);
   const[elapsed,setElapsed]=useState("00:00");
   const[toast,setToast]=useState(null);
   const[syncing,setSyncing]=useState(false);
+  const[showEndConfirm,setShowEndConfirm]=useState(false);
   const[,forceRender]=useState(0);
   const prevDrillRef=useRef(false);
   const toastRef=useRef(null);
@@ -128,7 +160,6 @@ function App(){
   },[]);
 
   const readDb=useCallback(async()=>await dbRead(),[]);
-
   const writeDb=useCallback(async(data)=>{
     if(writingRef.current)return;
     writingRef.current=true;
@@ -136,7 +167,7 @@ function App(){
     writingRef.current=false;
   },[]);
 
-  // ── POLL ──────────────────────────────────────────────────────────────
+  // ── POLL ────────────────────────────────────────────────────────────────
   useEffect(()=>{
     const poll=async()=>{
       setSyncing(true);
@@ -148,7 +179,7 @@ function App(){
       if(!wasActive&&isNow){setAlertFlash(true);playAlarm();setTimeout(()=>setAlertFlash(false),3000);}
       if(wasActive&&!isNow)playEnd();
       prevDrillRef.current=isNow;
-      setShared(s);
+      setShared({...s,history:s.history||[],phonebook:s.phonebook||[]});
     };
     poll();
     const id=setInterval(poll,4000);
@@ -156,7 +187,7 @@ function App(){
     return()=>{clearInterval(id);clearInterval(tk);};
   },[readDb]);
 
-  // ── TIMER ─────────────────────────────────────────────────────────────
+  // ── TIMER ────────────────────────────────────────────────────────────────
   useEffect(()=>{
     if(!shared.drillActive||!shared.drillStartedAt){setElapsed("00:00");return;}
     const t=setInterval(()=>{
@@ -166,22 +197,27 @@ function App(){
     return()=>clearInterval(t);
   },[shared.drillActive,shared.drillStartedAt]);
 
-  // ── JOIN ──────────────────────────────────────────────────────────────
+  // ── JOIN ─────────────────────────────────────────────────────────────────
   const join=async()=>{
     const name=nameInput.trim();
     if(!name){showToast("Please enter your name");return;}
-    const user={name,role:roleInput.trim()||"Team Member",phone:phoneInput.trim(),status:"waiting",note:"",ts:Date.now()};
+    // check phonebook for existing phone
+    const pb=(shared.phonebook||[]);
+    const pbEntry=pb.find(p=>p.name.toLowerCase()===name.toLowerCase());
+    const phone=phoneInput.trim()||pbEntry?.phone||"";
+    const role=roleInput.trim()||pbEntry?.role||"Team Member";
+    const user={name,role,phone,status:"waiting",note:"",ts:Date.now()};
     setMe(user);LS.set("fc:me",user);
     const s=await readDb();
     const cur=s?.members||[];
     const idx=cur.findIndex(m=>m.name===name);
     if(idx>=0)cur[idx]=user;else cur.unshift(user);
-    const next={...s,members:cur};
+    const next={...s,members:cur,phonebook:s?.phonebook||[],history:s?.history||[]};
     setShared(next);await writeDb(next);
     showToast("Welcome, "+name+"! 👋");
   };
 
-  // ── STATUS ────────────────────────────────────────────────────────────
+  // ── STATUS ────────────────────────────────────────────────────────────────
   const setStatus=useCallback(async(status)=>{
     if(!me)return;
     const updated={...me,status,ts:Date.now()};
@@ -189,7 +225,8 @@ function App(){
     const s=await readDb();
     const cur=(s?.members||[]).map(m=>m.name===me.name?updated:m);
     const next={...s,members:cur};
-    setShared(next);await writeDb(next);
+    setShared(prev=>({...prev,members:cur}));
+    await writeDb(next);
     showToast(STATUS_META[status].icon+" "+STATUS_META[status].label);
   },[me,readDb,writeDb,showToast]);
 
@@ -200,18 +237,20 @@ function App(){
     const s=await readDb();
     const cur=(s?.members||[]).map(m=>m.name===me.name?updated:m);
     const next={...s,members:cur};
-    setShared(next);await writeDb(next);
+    setShared(prev=>({...prev,members:cur}));
+    await writeDb(next);
     showToast("📝 Note sent");
   },[me,noteInput,readDb,writeDb,showToast]);
 
-  // ── PIN ───────────────────────────────────────────────────────────────
+  // ── PIN ───────────────────────────────────────────────────────────────────
   const handleSetPin=async()=>{
     if(newPin.length<4){setPinError("PIN must be at least 4 digits");return;}
     if(newPin!==confirmPin){setPinError("PINs don't match");return;}
     const hash=hashPin(newPin);
     const s=await readDb();
     const next={...s,pinHash:hash};
-    setShared(next);await writeDb(next);
+    setShared(prev=>({...prev,pinHash:hash}));
+    await writeDb(next);
     setIsCoord(true);setShowSetPin(false);setNewPin("");setConfirmPin("");setPinError("");
     showToast("🔐 PIN set! You are now the coordinator.");
   };
@@ -222,11 +261,36 @@ function App(){
     }else{setPinError("Incorrect PIN");setPinInput("");}
   };
 
-  // ── SMS ───────────────────────────────────────────────────────────────
-  const blastSMS=useCallback(async(message,targets)=>{
+  // ── PHONEBOOK ─────────────────────────────────────────────────────────────
+  const addToPb=async()=>{
+    const name=pbName.trim();
+    if(!name||!pbPhone.trim()){showToast("Name and phone required");return;}
+    const entry={name,role:pbRole.trim()||"Team Member",phone:pbPhone.trim()};
+    const s=await readDb();
+    const pb=s?.phonebook||[];
+    const idx=pb.findIndex(p=>p.name===name);
+    if(idx>=0)pb[idx]=entry;else pb.push(entry);
+    const next={...s,phonebook:pb};
+    setShared(prev=>({...prev,phonebook:pb}));
+    await writeDb(next);
+    setPbName("");setPbRole("");setPbPhone("");
+    showToast("✅ "+name+" added to phone book");
+  };
+
+  const removeFromPb=async(name)=>{
+    const s=await readDb();
+    const pb=(s?.phonebook||[]).filter(p=>p.name!==name);
+    const next={...s,phonebook:pb};
+    setShared(prev=>({...prev,phonebook:pb}));
+    await writeDb(next);
+    showToast("🗑️ Removed "+name);
+  };
+
+  // ── SMS ───────────────────────────────────────────────────────────────────
+  const blastSMS=useCallback(async(targets,message)=>{
     if(!twSid||!twToken||!twFrom)return;
     const withPhone=targets.filter(m=>m.phone);
-    if(!withPhone.length){showToast("⚠️ No teammates have phone numbers");return;}
+    if(!withPhone.length){showToast("⚠️ No phone numbers found");return;}
     setSendingCount(withPhone.length);
     const results=await sendSMS(withPhone.map(m=>fmtPhone(m.phone)),message,{accountSid:twSid,authToken:twToken,fromNumber:fmtPhone(twFrom)});
     setSendingCount(0);
@@ -237,36 +301,85 @@ function App(){
     showToast("📱 SMS: "+sent+" sent"+(fail?", "+fail+" failed":""));
   },[twSid,twToken,twFrom,showToast]);
 
-  // ── DRILL ─────────────────────────────────────────────────────────────
+  // ── DRILL ─────────────────────────────────────────────────────────────────
   const startDrill=async()=>{
     const now=Date.now();
     const s=await readDb();
-    const cur=(s?.members||[]).map(m=>m.name===me?.name?m:{...m,status:"waiting",note:"",ts:now});
+    const pb=s?.phonebook||[];
+
+    // build members from phonebook — everyone starts as "waiting"
+    // keep existing members who are already in but reset their status
+    const existingNames=(s?.members||[]).map(m=>m.name);
+    const pbMembers=pb.map(p=>({
+      name:p.name,role:p.role,phone:p.phone,
+      status:"waiting",note:"",ts:now
+    }));
+    // merge: phonebook members + any existing members not in phonebook
+    const extra=(s?.members||[]).filter(m=>!pb.find(p=>p.name===m.name)).map(m=>({...m,status:"waiting",note:"",ts:now}));
+    const allMembers=[...pbMembers,...extra];
+
     prevDrillRef.current=false;
-    const next={...s,members:cur,drillActive:true,drillStartedAt:now,pingedAt:{}};
+    const next={...s,members:allMembers,drillActive:true,drillStartedAt:now,pingedAt:{},history:s?.history||[]};
     setShared(next);await writeDb(next);
     setAlertFlash(true);playAlarm();setTimeout(()=>setAlertFlash(false),3000);
-    const others=cur.filter(m=>m.name!==me?.name);
-    await blastSMS("🔥 FIRE DRILL STARTED\nReport your status NOW:\nhttps://mesutgmail.github.io/firecheck\n\n— FireCheck",others);
-    showToast("🔔 Drill started!");
+
+    // SMS everyone in phonebook with personalized link
+    const smsTargets=pb.map(p=>({
+      ...p,
+      // personalized link with name pre-filled
+      _msg:"🔥 FIRE DRILL STARTED\nTap to report your status now:\n"+APP_URL+"?name="+encodeURIComponent(p.name)+"\n\n— FireCheck"
+    }));
+
+    // send individually with personalized links
+    if(twSid&&twToken&&twFrom){
+      setSendingCount(smsTargets.length);
+      const results=await Promise.allSettled(
+        smsTargets.filter(p=>p.phone).map(p=>
+          fetch("https://api.twilio.com/2010-04-01/Accounts/"+twSid+"/Messages.json",{
+            method:"POST",
+            headers:{"Authorization":"Basic "+btoa(twSid+":"+twToken),"Content-Type":"application/x-www-form-urlencoded"},
+            body:new URLSearchParams({To:fmtPhone(p.phone),From:fmtPhone(twFrom),Body:p._msg}).toString(),
+          }).then(r=>r.json())
+        )
+      );
+      setSendingCount(0);
+      const withPhone=smsTargets.filter(p=>p.phone);
+      const log=withPhone.map((p,i)=>({ts:Date.now(),name:p.name,to:fmtPhone(p.phone),status:results[i].status==="fulfilled"&&!results[i].value?.error_code?"sent":"failed"}));
+      setSmsLog(prev=>[...log,...prev].slice(0,50));
+      const sent=log.filter(l=>l.status==="sent").length;
+      showToast("🔔 Drill started! SMS sent to "+sent+" teammates");
+    } else {
+      showToast("🔔 Drill started! (Setup SMS to send alerts)");
+    }
   };
 
+  // ── END DRILL (with history save) ─────────────────────────────────────────
   const endDrill=async()=>{
     const s=await readDb();
+    // save snapshot to history BEFORE ending
+    const snapshot={
+      id:Date.now(),
+      startedAt:s?.drillStartedAt||Date.now(),
+      endedAt:Date.now(),
+      members:(s?.members||[]).map(m=>({...m})), // deep copy
+      summary:{
+        safe:(s?.members||[]).filter(m=>m.status==="safe").length,
+        away:(s?.members||[]).filter(m=>m.status==="away").length,
+        out:(s?.members||[]).filter(m=>m.status==="out").length,
+        nothere:(s?.members||[]).filter(m=>m.status==="nothere").length,
+        waiting:(s?.members||[]).filter(m=>m.status==="waiting").length,
+        total:(s?.members||[]).length,
+      }
+    };
+    const history=[snapshot,...(s?.history||[])].slice(0,10); // keep last 10 drills
     prevDrillRef.current=true;
-    const next={...s,drillActive:false,drillStartedAt:null};
+    const next={...s,drillActive:false,drillStartedAt:null,history};
     setShared(next);await writeDb(next);
     playEnd();
-    const others=(s?.members||[]).filter(m=>m.name!==me?.name);
-    await blastSMS("✅ Fire drill ended. All clear! — FireCheck",others);
-    showToast("✅ Drill ended — all-clear SMS sent!");
-  };
-
-  const clearAll=async()=>{
-    const next={members:[],drillActive:false,drillStartedAt:null,pingedAt:{},pinHash:null,updatedAt:Date.now()};
-    setShared(next);setMe(null);LS.set("fc:me",null);
-    await writeDb(next);setIsCoord(false);
-    showToast("🗑️ Board cleared");
+    // send all-clear to phonebook
+    await blastSMS(s?.phonebook||[],"✅ Fire drill ended. All clear! — FireCheck");
+    setShowEndConfirm(false);
+    showToast("✅ Drill ended & saved to history!");
   };
 
   const pingMember=async(member)=>{
@@ -274,30 +387,31 @@ function App(){
     const s=await readDb();
     const pings={...(s?.pingedAt||{}),[member.name]:Date.now()};
     const next={...s,pingedAt:pings};
-    setShared(next);await writeDb(next);
-    if(member.phone)await blastSMS("📣 "+member.name+", the coordinator needs your fire drill status!\nhttps://mesutgmail.github.io/firecheck\n\n— FireCheck",[member]);
+    setShared(prev=>({...prev,pingedAt:pings}));
+    await writeDb(next);
+    if(member.phone){
+      const msg="📣 "+member.name+", the coordinator needs your fire drill status!\n"+APP_URL+"?name="+encodeURIComponent(member.name)+"\n\n— FireCheck";
+      await sendSMS([fmtPhone(member.phone)],msg,{accountSid:twSid,authToken:twToken,fromNumber:fmtPhone(twFrom)});
+    }
     showToast("📣 Pinged "+member.name);
   };
 
+  // ── RENDER HELPERS ────────────────────────────────────────────────────────
   const stats=(shared.members||[]).reduce((a,m)=>{a[m.status]=(a[m.status]||0)+1;return a;},{});
   const sorted=[...(shared.members||[])].sort((a,b)=>(SORT_ORDER[a.status]??4)-(SORT_ORDER[b.status]??4));
   const twilioReady=!!(twSid&&twToken&&twFrom);
   const pinIsSet=!!shared.pinHash;
   const h=React.createElement;
 
-  return h("div",{className:"root"},
-    alertFlash&&h("div",{className:"flash"}),
-    shared.drillActive&&h("div",{className:"drill-banner"},
-      h("span",null,"🔥"),"FIRE DRILL IN PROGRESS — REPORT YOUR STATUS NOW",
-      h("span",{className:"drill-timer"},elapsed),h("span",null,"🔥")
-    ),
+  // ── MODALS ────────────────────────────────────────────────────────────────
+  const modals=[];
 
-    // SET PIN MODAL
-    showSetPin&&h("div",{className:"overlay",onClick:e=>e.target===e.currentTarget&&setShowSetPin(false)},
+  if(showSetPin) modals.push(
+    h("div",{key:"sp",className:"overlay",onClick:e=>e.target===e.currentTarget&&setShowSetPin(false)},
       h("div",{className:"modal"},
         h("button",{className:"modal-close",onClick:()=>setShowSetPin(false)},"×"),
         h("h2",null,"🔐 Set Coordinator PIN"),
-        h("p",null,"Choose a PIN only you know. Required to start or end drills."),
+        h("p",null,"Only you will be able to start or end drills."),
         h("div",{className:"cfg-lbl",style:{marginBottom:6}},"CHOOSE A PIN (min 4 digits)"),
         h("input",{className:"pin-input",type:"password",inputMode:"numeric",maxLength:8,placeholder:"••••",value:newPin,onChange:e=>setNewPin(e.target.value.replace(/\D/g,"")),onKeyDown:e=>e.key==="Enter"&&document.getElementById("cp2").focus()}),
         h("div",{className:"cfg-lbl",style:{margin:"12px 0 6px"}},"CONFIRM PIN"),
@@ -306,10 +420,11 @@ function App(){
         h("button",{className:"btn-primary",style:{width:"100%",marginTop:10},onClick:handleSetPin},"Set PIN & Become Coordinator"),
         h("div",{className:"modal-hint"},"⚠️ Write your PIN down — there is no forgot PIN option.")
       )
-    ),
+    )
+  );
 
-    // UNLOCK MODAL
-    showUnlock&&h("div",{className:"overlay",onClick:e=>e.target===e.currentTarget&&(setShowUnlock(false),setPinInput(""),setPinError(""))},
+  if(showUnlock) modals.push(
+    h("div",{key:"ul",className:"overlay",onClick:e=>e.target===e.currentTarget&&(setShowUnlock(false),setPinInput(""),setPinError(""))},
       h("div",{className:"modal"},
         h("button",{className:"modal-close",onClick:()=>{setShowUnlock(false);setPinInput("");setPinError("");}},"×"),
         h("h2",null,"🔓 Coordinator Login"),
@@ -318,6 +433,46 @@ function App(){
         h("div",{className:"pin-error"},pinError),
         h("button",{className:"btn-primary",style:{width:"100%",marginTop:10},onClick:handleUnlock},"Unlock")
       )
+    )
+  );
+
+  // end drill confirmation
+  if(showEndConfirm) modals.push(
+    h("div",{key:"ec",className:"overlay",onClick:e=>e.target===e.currentTarget&&setShowEndConfirm(false)},
+      h("div",{className:"modal"},
+        h("button",{className:"modal-close",onClick:()=>setShowEndConfirm(false)},"×"),
+        h("h2",null,"✅ End Drill?"),
+        h("p",null,"This will save the current drill results to history and send an all-clear SMS to all teammates."),
+        h("div",{style:{background:"#0d0d0d",borderRadius:10,padding:"14px 16px",marginBottom:16}},
+          h("div",{style:{fontFamily:"'Space Mono',monospace",fontSize:11,color:"#444",marginBottom:10}},"CURRENT DRILL SNAPSHOT"),
+          h("div",{style:{display:"grid",gridTemplateColumns:"1fr 1fr",gap:8}},
+            [{label:"✅ Safe",val:stats.safe||0,color:"#22c55e"},
+             {label:"🏃 Evacuating",val:stats.away||0,color:"#f59e0b"},
+             {label:"🏠 Not in",val:stats.out||0,color:"#3b82f6"},
+             {label:"⏳ No response",val:(stats.waiting||0)+(stats.nothere||0),color:"#555"},
+            ].map(({label,val,color})=>
+              h("div",{key:label,style:{background:"#141414",borderRadius:8,padding:"10px 12px"}},
+                h("div",{style:{fontSize:18,fontWeight:800,color,fontFamily:"'Space Mono',monospace"}},val),
+                h("div",{style:{fontSize:11,color:"#444",marginTop:2}},label)
+              )
+            )
+          )
+        ),
+        h("div",{style:{display:"flex",gap:8}},
+          h("button",{className:"btn-secondary",style:{flex:1},onClick:()=>setShowEndConfirm(false)},"Cancel"),
+          h("button",{className:"btn-primary",style:{flex:1,background:"#22c55e"},onClick:endDrill},"✅ End & Save Drill")
+        )
+      )
+    )
+  );
+
+  return h("div",{className:"root"},
+    alertFlash&&h("div",{className:"flash"}),
+    ...modals,
+
+    shared.drillActive&&h("div",{className:"drill-banner"},
+      h("span",null,"🔥"),"FIRE DRILL IN PROGRESS — REPORT YOUR STATUS NOW",
+      h("span",{className:"drill-timer"},elapsed),h("span",null,"🔥")
     ),
 
     // HEADER
@@ -329,9 +484,9 @@ function App(){
           ?h("div",{className:"badge",style:{borderColor:"rgba(245,158,11,.4)",color:"#f59e0b",background:"rgba(245,158,11,.08)"}},h("div",{className:"live-dot",style:{background:"#f59e0b"}}),"SENDING "+sendingCount+"…")
           :h("button",{className:"badge "+(twilioReady?"green":"dim"),onClick:()=>setShowConfig(v=>!v)},twilioReady?[h("div",{key:"d",className:"live-dot"}),"SMS READY"]:"📱 SETUP SMS"),
         isCoord
-          ?h("button",{className:"badge coord",onClick:()=>{setIsCoord(false);showToast("🔒 Locked");}},"🔒 Lock Controls")
+          ?h("button",{className:"badge coord",onClick:()=>{setIsCoord(false);showToast("🔒 Locked");}},"🔒 Lock")
           :pinIsSet
-            ?h("button",{className:"badge dim",onClick:()=>{setShowUnlock(true);setPinError("");}},"🔓 Coordinator Login")
+            ?h("button",{className:"badge dim",onClick:()=>{setShowUnlock(true);setPinError("");}},"🔓 Coordinator")
             :h("button",{className:"badge dim",onClick:()=>{setShowSetPin(true);setPinError("");}},"🔐 Setup Coordinator")
       )
     ),
@@ -341,7 +496,7 @@ function App(){
       // TWILIO CONFIG
       showConfig&&h("div",{className:"config-panel"},
         h("h3",null,"📱 Twilio SMS Setup"),
-        h("p",null,"Credentials saved only on your device. Your teammates do not need to set this up."),
+        h("p",null,"Only you need to set this up. Teammates never see this."),
         h("div",{className:"cfg-row"},
           h("div",{className:"cfg-field"},h("div",{className:"cfg-lbl"},"ACCOUNT SID"),h("input",{className:"inp",placeholder:"ACxxxxxxxx",value:twSid,onChange:e=>setTwSid(e.target.value),style:{width:"100%"}})),
           h("div",{className:"cfg-field"},h("div",{className:"cfg-lbl"},"AUTH TOKEN"),h("input",{className:"inp",type:"password",placeholder:"••••••••",value:twToken,onChange:e=>setTwToken(e.target.value),style:{width:"100%"}}))
@@ -352,16 +507,16 @@ function App(){
         )
       ),
 
-      // MY STATUS
+      // MY STATUS CARD
       h("div",{className:"card"},
         h("div",{className:"lbl"},"// my status"),
         me&&h("div",{className:"user-row"},
           h(Avatar,{name:me.name,color:STATUS_META[me.status]?.color||"#555",bg:STATUS_META[me.status]?.bg||"#1a1a1a",size:44}),
           h("div",{className:"user-info"},
-            h("h2",null,me.name,isCoord&&h("span",{style:{fontSize:12,color:"#fbbf24",marginLeft:8,fontFamily:"'Space Mono',monospace"}},"★ COORD")),
+            h("h2",null,me.name,isCoord&&h("span",{style:{fontSize:11,color:"#fbbf24",marginLeft:8,fontFamily:"'Space Mono',monospace"}},"★ COORD")),
             h("p",null,me.role)
           ),
-          h("button",{onClick:()=>{setMe(null);LS.set("fc:me",null);},style:{marginLeft:"auto",background:"transparent",border:"1px solid #222",borderRadius:8,padding:"4px 10px",color:"#444",fontFamily:"'Space Mono',monospace",fontSize:10,cursor:"pointer"}},"edit")
+          h("button",{onClick:()=>{setMe(null);LS.set("fc:me",null);setNameInput("");},style:{marginLeft:"auto",background:"transparent",border:"1px solid #222",borderRadius:8,padding:"4px 10px",color:"#444",fontFamily:"'Space Mono',monospace",fontSize:10,cursor:"pointer"}},"edit")
         ),
         !me
           ?h("div",null,
@@ -370,9 +525,10 @@ function App(){
               h("input",{className:"inp",placeholder:"Role / team…",value:roleInput,onChange:e=>setRoleInput(e.target.value),onKeyDown:e=>e.key==="Enter"&&join(),maxLength:40,style:{maxWidth:180}})
             ),
             h("div",{className:"input-row"},
-              h("input",{className:"inp",placeholder:"📱 Mobile number for SMS alerts…",value:phoneInput,onChange:e=>setPhoneInput(e.target.value),onKeyDown:e=>e.key==="Enter"&&join(),maxLength:15,type:"tel"}),
+              h("input",{className:"inp",placeholder:"📱 Mobile number (optional if in phone book)…",value:phoneInput,onChange:e=>setPhoneInput(e.target.value),onKeyDown:e=>e.key==="Enter"&&join(),maxLength:15,type:"tel"}),
               h("button",{className:"btn-primary",onClick:join},"Join Team")
-            )
+            ),
+            urlName&&h("div",{style:{fontSize:11,color:"#22c55e",fontFamily:"'Space Mono',monospace",marginTop:8}},"✅ Name pre-filled from SMS link")
           )
           :h("div",null,
             h("div",{className:"status-grid"},
@@ -394,49 +550,57 @@ function App(){
           )
       ),
 
-      // DRILL CONTROLS
-      isCoord
-        ?h("div",{className:"coord-panel"},
-          h("div",{className:"coord-panel-hdr"},
-            h("h3",null,"🎛️ Drill Control ",h("span",{className:"coord-tag"},"COORDINATOR")),
-            h("div",{className:"ctrl-btns"},
-              h("button",{className:"cbtn start",onClick:startDrill},"🔔 Start Drill"),
-              h("button",{className:"cbtn end",onClick:endDrill},"✅ End Drill"),
-              h("button",{className:"cbtn clr",onClick:clearAll},"🗑️ Clear"),
-              h("button",{className:"cbtn lock",onClick:()=>{setIsCoord(false);showToast("🔒 Locked");}},"🔒 Lock")
-            )
-          ),
-          h("div",{className:"coord-hint"},
-            "SMS will be sent to: ",
-            h("strong",{style:{color:"#888"}},(shared.members||[]).filter(m=>m.phone&&m.name!==me?.name).length," teammate(s) with phone numbers")
+      // COORDINATOR PANEL
+      isCoord&&h("div",{className:"coord-panel"},
+        h("div",{className:"coord-panel-hdr"},
+          h("h3",null,"🎛️ Drill Control ",h("span",{className:"coord-tag"},"COORDINATOR")),
+          h("div",{className:"ctrl-btns"},
+            h("button",{className:"cbtn start",onClick:startDrill},"🔔 Start Drill"),
+            h("button",{className:"cbtn end",onClick:()=>setShowEndConfirm(true)},"✅ End Drill"),
+            h("button",{className:"cbtn lock",onClick:()=>{setIsCoord(false);showToast("🔒 Locked");}},"🔒 Lock")
           )
-        )
-        :h("div",{className:"locked-panel"},
-          h("div",{className:"locked-info"},
-            h("h3",null,"🔒 Drill Control"),
-            h("p",null,pinIsSet?"Coordinator login required to start or end a drill":"No coordinator set up yet")
-          ),
-          pinIsSet
-            ?h("button",{className:"cbtn",onClick:()=>{setShowUnlock(true);setPinError("");}},"🔓 Coordinator Login")
-            :h("button",{className:"cbtn start",onClick:()=>{setShowSetPin(true);setPinError("");}},"🔐 Become Coordinator")
         ),
-
-      // STATS
-      h("div",{className:"stats"},
-        [{key:"safe",color:"#22c55e",label:"SAFE"},
-         {key:"away",color:"#f59e0b",label:"EVACUATING"},
-         {key:"out",color:"#3b82f6",label:"NOT IN"},
-         {key:"waiting",color:"#4b5563",label:"UNKNOWN",extra:"nothere"}
-        ].map(({key,color,label,extra})=>
-          h("div",{key,className:"stat"},
-            h("div",{className:"stat-n",style:{color}},(stats[key]||0)+(extra?stats[extra]||0:0)),
-            h("div",{className:"stat-l"},label)
-          )
+        h("div",{className:"coord-hint"},
+          "Start → personalized SMS sent to all in phone book (",
+          h("strong",{style:{color:"#888"}},(shared.phonebook||[]).filter(p=>p.phone).length," contacts"),
+          ") | End → confirmation screen protects against accidental taps"
         )
       ),
 
-      // TEAM LIST
-      h("div",null,
+      !isCoord&&h("div",{className:"locked-panel"},
+        h("div",{className:"locked-info"},
+          h("h3",null,"🔒 Drill Control"),
+          h("p",null,pinIsSet?"Coordinator login required":"No coordinator set up yet")
+        ),
+        pinIsSet
+          ?h("button",{className:"cbtn",onClick:()=>{setShowUnlock(true);setPinError("");}},"🔓 Coordinator Login")
+          :h("button",{className:"cbtn start",onClick:()=>{setShowSetPin(true);setPinError("");}},"🔐 Become Coordinator")
+      ),
+
+      // TABS
+      h("div",{className:"tabs"},
+        [{id:"live",label:"🔴 Live Board"},
+         {id:"phonebook",label:"📋 Phone Book"},
+         {id:"history",label:"📁 Drill History"},
+        ].map(({id,label})=>
+          h("button",{key:id,className:"tab-btn"+(activeTab===id?" active":""),onClick:()=>setActiveTab(id)},label)
+        )
+      ),
+
+      // ── LIVE BOARD ──────────────────────────────────────────────────────
+      activeTab==="live"&&h("div",null,
+        h("div",{className:"stats"},
+          [{key:"safe",color:"#22c55e",label:"SAFE"},
+           {key:"away",color:"#f59e0b",label:"EVACUATING"},
+           {key:"out",color:"#3b82f6",label:"NOT IN"},
+           {key:"waiting",color:"#4b5563",label:"UNKNOWN",extra:"nothere"}
+          ].map(({key,color,label,extra})=>
+            h("div",{key,className:"stat"},
+              h("div",{className:"stat-n",style:{color}},(stats[key]||0)+(extra?stats[extra]||0:0)),
+              h("div",{className:"stat-l"},label)
+            )
+          )
+        ),
         h("div",{className:"team-hdr"},
           h("h3",null,"Team Status"),
           h("span",{className:"cnt-badge"},(shared.members||[]).length+" member"+((shared.members||[]).length!==1?"s":"")),
@@ -444,44 +608,116 @@ function App(){
         ),
         (shared.members||[]).length===0
           ?h("div",{className:"empty"},
-            h("h3",null,"No team members yet"),
-            h("p",null,"Enter your name above to join. Share this link with your team:"),
-            h("p",{style:{marginTop:8,fontFamily:"'Space Mono',monospace",fontSize:11,color:"#444"}},"mesutgmail.github.io/firecheck")
+            h("h3",null,"No responses yet"),
+            h("p",null,"Start a drill to notify your team. They'll tap the SMS link to report their status.")
           )
           :sorted.map(member=>{
             const meta=STATUS_META[member.status]||STATUS_META.waiting;
             const recentPing=(shared.pingedAt||{})[member.name]&&(Date.now()-(shared.pingedAt||{})[member.name])<12000;
-            const needsPing=isCoord&&(member.status==="waiting"||member.status==="nothere")&&member.name!==me?.name;
+            const needsPing=isCoord&&(member.status==="waiting"||member.status==="nothere");
             return h("div",{key:member.name,className:"member",style:recentPing?{borderColor:"rgba(245,158,11,.4)",background:"rgba(245,158,11,.04)"}:{}},
               h(Avatar,{name:member.name,color:meta.color,bg:meta.bg,size:38}),
               h("div",{className:"m-info"},
                 h("h4",null,member.name,me&&member.name===me.name&&h("span",{className:"you-tag"},"(you)")),
                 h("p",null,member.role),
-                member.phone&&h("div",{className:"m-phone"},"📱 ",fmtPhone(member.phone)),
                 member.note&&h("div",{className:"m-note"},'"',member.note,'"'),
                 h("div",{className:"m-time"},timeAgo(member.ts))
               ),
               h("div",{className:"pill",style:{background:meta.bg,color:meta.color,border:"1px solid "+meta.border}},meta.icon," ",meta.label),
               needsPing&&h("button",{className:"ping-btn"+(recentPing?" pinged":""),onClick:()=>pingMember(member)},recentPing?"📣 SENT":"📣 PING")
             );
-          })
+          }),
+        smsLog.length>0&&h("div",{className:"sms-log",style:{marginTop:16}},
+          h("h4",null,"📋 SMS Log ",h("span",{style:{fontWeight:400,fontSize:11,color:"#444"}},"— "+smsLog.length+" messages")),
+          smsLog.slice(0,5).map((l,i)=>h("div",{key:i,className:"log-entry"},
+            h("span",{className:"log-status "+l.status},l.status==="sent"?"✓ SENT":"✗ FAIL"),
+            h("span",{className:"log-name"},l.name),
+            h("span",{className:"log-num"},l.to),
+            h("span",{className:"log-time"},timeAgo(l.ts))
+          ))
+        )
       ),
 
-      // SMS LOG
-      smsLog.length>0&&h("div",{className:"sms-log"},
-        h("h4",null,"📋 SMS Log ",h("span",{style:{fontWeight:400,fontSize:11,color:"#444"}},"— "+smsLog.length+" messages")),
-        smsLog.map((l,i)=>h("div",{key:i,className:"log-entry"},
-          h("span",{className:"log-status "+l.status},l.status==="sent"?"✓ SENT":"✗ FAIL"),
-          h("span",{className:"log-name"},l.name),
-          h("span",{className:"log-num"},l.to),
-          h("span",{className:"log-time"},timeAgo(l.ts))
-        ))
+      // ── PHONE BOOK ──────────────────────────────────────────────────────
+      activeTab==="phonebook"&&h("div",null,
+        h("div",{className:"card"},
+          h("div",{className:"lbl"},"// add teammate"),
+          h("p",{style:{fontSize:12,color:"#555",marginBottom:16,lineHeight:1.6}},"Add your teammates here once. When a drill starts, they'll receive a personalized SMS with a link — no app setup needed from them."),
+          h("div",{className:"input-row"},
+            h("input",{className:"inp",placeholder:"Full name…",value:pbName,onChange:e=>setPbName(e.target.value),maxLength:30}),
+            h("input",{className:"inp",placeholder:"Role…",value:pbRole,onChange:e=>setPbRole(e.target.value),maxLength:40,style:{maxWidth:160}})
+          ),
+          h("div",{className:"input-row"},
+            h("input",{className:"inp",placeholder:"📱 Phone number…",value:pbPhone,onChange:e=>setPbPhone(e.target.value),maxLength:15,type:"tel",onKeyDown:e=>e.key==="Enter"&&addToPb()}),
+            h("button",{className:"btn-primary",onClick:addToPb},"Add")
+          )
+        ),
+        (shared.phonebook||[]).length===0
+          ?h("div",{className:"empty"},h("h3",null,"Phone book is empty"),h("p",null,"Add your teammates above. Their numbers are saved permanently."))
+          :(shared.phonebook||[]).map(p=>
+            h("div",{key:p.name,className:"member"},
+              h(Avatar,{name:p.name,color:"#6b7280",bg:"rgba(107,114,128,0.12)",size:38}),
+              h("div",{className:"m-info"},
+                h("h4",null,p.name),
+                h("p",null,p.role),
+                h("div",{className:"m-phone"},"📱 ",fmtPhone(p.phone))
+              ),
+              isCoord&&h("button",{onClick:()=>removeFromPb(p.name),style:{border:"1px solid #333",background:"transparent",color:"#555",borderRadius:8,padding:"5px 10px",fontFamily:"'Space Mono',monospace",fontSize:10,cursor:"pointer",flexShrink:0}},"Remove")
+            )
+          )
+      ),
+
+      // ── DRILL HISTORY ───────────────────────────────────────────────────
+      activeTab==="history"&&h("div",null,
+        (shared.history||[]).length===0
+          ?h("div",{className:"empty"},h("h3",null,"No drill history yet"),h("p",null,"Completed drills will be saved here automatically when you end a drill."))
+          :(shared.history||[]).map((drill,di)=>
+            h("div",{key:drill.id,className:"card",style:{marginBottom:14}},
+              h("div",{style:{display:"flex",alignItems:"center",justifyContent:"space-between",marginBottom:12,flexWrap:"wrap",gap:8}},
+                h("div",null,
+                  h("div",{style:{fontWeight:800,fontSize:15}},"Drill #"+(( shared.history||[]).length-di)),
+                  h("div",{style:{fontSize:11,color:"#555",fontFamily:"'Space Mono',monospace",marginTop:3}},fmtDate(drill.startedAt)+" → "+fmtDate(drill.endedAt))
+                ),
+                h("div",{style:{fontFamily:"'Space Mono',monospace",fontSize:11,color:"#444"}},
+                  Math.floor((drill.endedAt-drill.startedAt)/60000)+"m "+Math.floor(((drill.endedAt-drill.startedAt)%60000)/1000)+"s"
+                )
+              ),
+              h("div",{style:{display:"grid",gridTemplateColumns:"repeat(4,1fr)",gap:8,marginBottom:14}},
+                [{label:"✅ Safe",val:drill.summary.safe,color:"#22c55e"},
+                 {label:"🏃 Evac",val:drill.summary.away,color:"#f59e0b"},
+                 {label:"🏠 Out",val:drill.summary.out,color:"#3b82f6"},
+                 {label:"⏳ No resp",val:drill.summary.waiting+drill.summary.nothere,color:"#555"},
+                ].map(({label,val,color})=>
+                  h("div",{key:label,style:{background:"#0d0d0d",borderRadius:8,padding:"10px",textAlign:"center"}},
+                    h("div",{style:{fontSize:20,fontWeight:800,color,fontFamily:"'Space Mono',monospace"}},val),
+                    h("div",{style:{fontSize:10,color:"#444",marginTop:2}},label)
+                  )
+                )
+              ),
+              h("div",{style:{borderTop:"1px solid #1a1a1a",paddingTop:12}},
+                h("div",{style:{fontFamily:"'Space Mono',monospace",fontSize:10,color:"#333",marginBottom:8,letterSpacing:"0.1em"}},"MEMBER RESPONSES"),
+                (drill.members||[]).sort((a,b)=>(SORT_ORDER[a.status]??4)-(SORT_ORDER[b.status]??4)).map(m=>{
+                  const meta=STATUS_META[m.status]||STATUS_META.waiting;
+                  return h("div",{key:m.name,style:{display:"flex",alignItems:"center",gap:10,padding:"6px 0",borderBottom:"1px solid #111"}},
+                    h(Avatar,{name:m.name,color:meta.color,bg:meta.bg,size:30}),
+                    h("div",{style:{flex:1,minWidth:0}},
+                      h("div",{style:{fontSize:13,fontWeight:700}},m.name),
+                      m.note&&h("div",{style:{fontSize:11,color:"#555",fontStyle:"italic"}},'"',m.note,'"')
+                    ),
+                    h("div",{style:{display:"flex",alignItems:"center",gap:5,borderRadius:20,padding:"3px 10px",fontSize:11,fontWeight:700,background:meta.bg,color:meta.color,border:"1px solid "+meta.border,whiteSpace:"nowrap",flexShrink:0}},meta.icon," ",meta.label)
+                  );
+                })
+              )
+            )
+          )
       )
     ),
+
     h("div",{className:"toast"+(toast?" show":"")},toast)
   );
 }
 
+// ── STYLES ────────────────────────────────────────────────────────────────────
 const style=document.createElement("style");
 style.textContent=`
 .root{min-height:100vh;background:#090909;color:#f0ede8;font-family:'Syne',sans-serif;padding-bottom:80px}
@@ -502,10 +738,10 @@ style.textContent=`
 .badge.coord{border-color:rgba(251,191,36,.4);color:#fbbf24;background:rgba(251,191,36,.08)}
 .live-dot{width:6px;height:6px;background:#22c55e;border-radius:50%;animation:pulse 1.2s infinite;flex-shrink:0}
 @keyframes pulse{0%,100%{opacity:1;transform:scale(1)}50%{opacity:.4;transform:scale(.7)}}
-.overlay{position:fixed;inset:0;background:rgba(0,0,0,.75);z-index:1000;display:flex;align-items:center;justify-content:center;padding:20px}
-.modal{background:#141414;border:1px solid #2a2a2a;border-radius:20px;padding:32px;width:100%;max-width:380px;position:relative}
+.overlay{position:fixed;inset:0;background:rgba(0,0,0,.8);z-index:1000;display:flex;align-items:center;justify-content:center;padding:20px}
+.modal{background:#141414;border:1px solid #2a2a2a;border-radius:20px;padding:28px;width:100%;max-width:420px;position:relative;max-height:90vh;overflow-y:auto}
 .modal h2{font-size:18px;font-weight:800;margin-bottom:6px}
-.modal p{font-size:13px;color:#555;margin-bottom:20px;line-height:1.6}
+.modal p{font-size:13px;color:#555;margin-bottom:16px;line-height:1.6}
 .modal-close{position:absolute;top:16px;right:18px;background:none;border:none;color:#444;font-size:20px;cursor:pointer}.modal-close:hover{color:#888}
 .pin-input{width:100%;background:#1a1a1a;border:1.5px solid #252525;border-radius:10px;padding:12px 16px;color:#f0ede8;font-family:'Space Mono',monospace;font-size:20px;letter-spacing:.3em;outline:none;text-align:center;transition:border-color .15s}.pin-input:focus{border-color:#444}
 .pin-error{color:#ef4444;font-size:12px;font-family:'Space Mono',monospace;margin-top:6px;min-height:18px}
@@ -525,6 +761,7 @@ style.textContent=`
 .inp{flex:1;min-width:100px;background:#1a1a1a;border:1.5px solid #222;border-radius:10px;padding:10px 14px;color:#f0ede8;font-family:'Syne',sans-serif;font-size:13px;outline:none;transition:border-color .15s;width:100%}
 .inp::placeholder{color:#3a3a3a}.inp:focus{border-color:#3a3a3a}
 .btn-primary{background:#ff4d2e;border:none;border-radius:10px;padding:10px 18px;color:#fff;font-family:'Syne',sans-serif;font-size:13px;font-weight:700;cursor:pointer;transition:opacity .15s;white-space:nowrap}.btn-primary:hover{opacity:.85}
+.btn-secondary{background:transparent;border:1.5px solid #252525;border-radius:10px;padding:10px 18px;color:#888;font-family:'Syne',sans-serif;font-size:13px;font-weight:700;cursor:pointer;transition:all .15s}.btn-secondary:hover{border-color:#555;color:#f0ede8}
 .input-row{display:flex;gap:8px;flex-wrap:wrap;margin-bottom:8px}
 .status-grid{display:grid;grid-template-columns:1fr 1fr;gap:10px}
 .s-btn{border:1.5px solid #222;background:#1a1a1a;border-radius:12px;padding:13px 15px;cursor:pointer;transition:all .18s;display:flex;align-items:center;gap:11px;color:#f0ede8;font-family:'Syne',sans-serif;font-size:13px;font-weight:600;text-align:left;width:100%}
@@ -533,7 +770,7 @@ style.textContent=`
 .s-sub{display:block;font-size:11px;font-weight:400;color:#444;margin-top:2px}
 .note-row{display:flex;gap:8px;margin-top:12px}
 .coord-panel{background:#141414;border:1.5px solid rgba(251,191,36,.2);border-radius:16px;padding:20px 22px;margin-bottom:18px}
-.coord-panel-hdr{display:flex;align-items:center;justify-content:space-between;flex-wrap:wrap;gap:10px;margin-bottom:12px}
+.coord-panel-hdr{display:flex;align-items:center;justify-content:space-between;flex-wrap:wrap;gap:10px;margin-bottom:10px}
 .coord-panel-hdr h3{font-size:15px;font-weight:800;display:flex;align-items:center;gap:8px}
 .coord-tag{font-family:'Space Mono',monospace;font-size:10px;color:#fbbf24;background:rgba(251,191,36,.1);border:1px solid rgba(251,191,36,.25);border-radius:20px;padding:3px 10px;letter-spacing:.08em}
 .coord-hint{font-size:11px;color:#333;font-family:'Space Mono',monospace;line-height:1.6}
@@ -541,11 +778,14 @@ style.textContent=`
 .cbtn{border:1.5px solid #252525;background:#1a1a1a;color:#f0ede8;border-radius:10px;padding:9px 16px;font-family:'Syne',sans-serif;font-size:12px;font-weight:700;cursor:pointer;transition:all .15s}.cbtn:hover{border-color:#555}
 .cbtn.start{background:#ff4d2e;border-color:#ff4d2e;color:#fff}.cbtn.start:hover{opacity:.85}
 .cbtn.end{border-color:#22c55e;color:#22c55e}.cbtn.end:hover{background:rgba(34,197,94,.08)}
-.cbtn.clr{border-color:#ef4444;color:#ef4444}.cbtn.clr:hover{background:rgba(239,68,68,.08)}
 .cbtn.lock{border-color:#fbbf24;color:#fbbf24}.cbtn.lock:hover{background:rgba(251,191,36,.08)}
 .locked-panel{background:#131313;border:1px solid #1e1e1e;border-radius:16px;padding:18px 22px;margin-bottom:18px;display:flex;align-items:center;justify-content:space-between;gap:12px;flex-wrap:wrap}
 .locked-info h3{font-size:14px;font-weight:700;color:#555;display:flex;align-items:center;gap:8px}
 .locked-info p{font-size:12px;color:#333;margin-top:3px}
+.tabs{display:flex;gap:4px;margin-bottom:18px;background:#0d0d0d;border-radius:12px;padding:4px}
+.tab-btn{flex:1;border:none;background:transparent;color:#555;border-radius:9px;padding:9px 12px;font-family:'Syne',sans-serif;font-size:12px;font-weight:700;cursor:pointer;transition:all .15s;white-space:nowrap}
+.tab-btn:hover{color:#888}
+.tab-btn.active{background:#1a1a1a;color:#f0ede8;box-shadow:0 1px 4px rgba(0,0,0,.4)}
 .stats{display:grid;grid-template-columns:repeat(4,1fr);gap:10px;margin-bottom:18px}
 .stat{background:#131313;border:1px solid #1e1e1e;border-radius:12px;padding:15px;text-align:center}
 .stat-n{font-size:28px;font-weight:800;font-family:'Space Mono',monospace}
@@ -564,7 +804,7 @@ style.textContent=`
 .ping-btn{border:1px solid #252525;background:transparent;color:#555;border-radius:8px;padding:5px 10px;font-family:'Space Mono',monospace;font-size:10px;cursor:pointer;transition:all .15s;margin-left:4px;flex-shrink:0}.ping-btn:hover{border-color:#ff4d2e;color:#ff4d2e}.ping-btn.pinged{border-color:#f59e0b;color:#f59e0b}
 .empty{background:rgba(107,114,128,.04);border:1px dashed #1e1e1e;border-radius:12px;padding:40px;text-align:center;color:#333}
 .empty h3{font-size:15px;color:#555;margin-bottom:6px}.empty p{font-size:13px;margin-top:4px}
-.sms-log{background:#0d0d0d;border:1px solid #1a1a1a;border-radius:12px;padding:16px;margin-top:18px}
+.sms-log{background:#0d0d0d;border:1px solid #1a1a1a;border-radius:12px;padding:16px}
 .sms-log h4{font-size:13px;font-weight:700;margin-bottom:12px}
 .log-entry{display:flex;align-items:center;gap:10px;padding:8px 0;border-bottom:1px solid #141414;font-size:11px}.log-entry:last-child{border-bottom:none}
 .log-status{font-family:'Space Mono',monospace;font-size:10px;font-weight:700;padding:2px 8px;border-radius:6px}
@@ -572,7 +812,7 @@ style.textContent=`
 .log-name{font-weight:600;flex:1}.log-num{color:#333;font-family:'Space Mono',monospace}.log-time{color:#2a2a2a;font-family:'Space Mono',monospace;font-size:9px}
 .toast{position:fixed;bottom:26px;left:50%;transform:translateX(-50%) translateY(80px);background:#1e1e1e;border:1px solid #2a2a2a;border-radius:12px;padding:11px 20px;font-size:13px;font-weight:600;transition:transform .3s cubic-bezier(.34,1.56,.64,1);z-index:9998;white-space:nowrap;pointer-events:none}
 .toast.show{transform:translateX(-50%) translateY(0)}
-@media(max-width:540px){.stats{grid-template-columns:repeat(2,1fr)}.status-grid{grid-template-columns:1fr}.coord-panel-hdr{flex-direction:column;align-items:flex-start}.cfg-row{grid-template-columns:1fr}.locked-panel{flex-direction:column;align-items:flex-start}}
+@media(max-width:540px){.stats{grid-template-columns:repeat(2,1fr)}.status-grid{grid-template-columns:1fr}.coord-panel-hdr{flex-direction:column;align-items:flex-start}.cfg-row{grid-template-columns:1fr}.locked-panel{flex-direction:column;align-items:flex-start}.tabs{flex-direction:column}}
 `;
 document.head.appendChild(style);
 ReactDOM.createRoot(document.getElementById("root")).render(React.createElement(App));
