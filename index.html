@@ -12,712 +12,598 @@
 <body>
 <div id="root"></div>
 <script>
-// ── HARDCODED CONFIG ──────────────────────────────────────────────────────────
 const BIN_ID  = "69d4529936566621a8867f2e";
 const API_KEY = "$2a$10$bIAm8zuPXIaTWlFc89g7TetTMExFEZ/XgsWRoMSJYDx.h8l87gE2S";
 const APP_URL = "https://mesutgmail.github.io/firecheck";
 
-// ── HELPERS ───────────────────────────────────────────────────────────────────
-const LS={
-  get(k){try{const v=localStorage.getItem(k);return v?JSON.parse(v):null;}catch(e){return null;}},
-  set(k,v){try{localStorage.setItem(k,JSON.stringify(v));}catch(e){}}
-};
+const LS={get(k){try{const v=localStorage.getItem(k);return v?JSON.parse(v):null;}catch(e){return null;}},set(k,v){try{localStorage.setItem(k,JSON.stringify(v));}catch(e){}}};
 function initials(n){return n.split(" ").map(w=>w[0]).join("").toUpperCase().slice(0,2);}
-function timeAgo(ts){
-  const d=Math.floor((Date.now()-ts)/1000);
-  if(d<10)return"just now";if(d<60)return d+"s ago";
-  if(d<3600)return Math.floor(d/60)+"m ago";return Math.floor(d/3600)+"h ago";
-}
-function fmtPhone(raw){
-  if(!raw)return"";
-  const d=raw.replace(/\D/g,"");
-  if(d.length===10)return"+1"+d;
-  if(d.length===11&&d[0]==="1")return"+"+d;
-  if(raw.startsWith("+"))return raw;
-  return"+"+d;
-}
-function fmtDate(ts){
-  if(!ts)return"—";
-  return new Date(ts).toLocaleString("en-US",{month:"short",day:"numeric",year:"numeric",hour:"2-digit",minute:"2-digit"});
-}
+function timeAgo(ts){const d=Math.floor((Date.now()-ts)/1000);if(d<10)return"just now";if(d<60)return d+"s ago";if(d<3600)return Math.floor(d/60)+"m ago";return Math.floor(d/3600)+"h ago";}
+function fmtPhone(raw){if(!raw)return"";const d=raw.replace(/\D/g,"");if(d.length===10)return"+1"+d;if(d.length===11&&d[0]==="1")return"+"+d;if(raw.startsWith("+"))return raw;return"+"+d;}
+function fmtDate(ts){if(!ts)return"—";return new Date(ts).toLocaleString("en-US",{month:"short",day:"numeric",year:"numeric",hour:"2-digit",minute:"2-digit"});}
 function hashPin(pin){let h=0;for(let i=0;i<pin.length;i++)h=(Math.imul(31,h)+pin.charCodeAt(i))|0;return h.toString(36);}
-
-// get ?name= from URL
-function getUrlName(){
-  try{
-    const p=new URLSearchParams(window.location.search);
-    return p.get("name")||"";
-  }catch(e){return"";}
-}
+function getUrlName(){try{return new URLSearchParams(window.location.search).get("name")||"";}catch(e){return "";}}
 
 const STATUS_META={
-  safe:   {label:"Safe & Outside", icon:"✅",color:"#22c55e",bg:"rgba(34,197,94,0.12)",  border:"rgba(34,197,94,0.3)"},
-  away:   {label:"Evacuating Now", icon:"🏃",color:"#f59e0b",bg:"rgba(245,158,11,0.12)", border:"rgba(245,158,11,0.3)"},
-  out:    {label:"Not at Work",    icon:"🏠",color:"#3b82f6",bg:"rgba(59,130,246,0.12)", border:"rgba(59,130,246,0.3)"},
-  nothere:{label:"Unknown",        icon:"❓",color:"#9ca3af",bg:"rgba(107,114,128,0.12)",border:"rgba(107,114,128,0.3)"},
-  waiting:{label:"No Response Yet",icon:"⏳",color:"#4b5563",bg:"rgba(75,85,99,0.08)",  border:"rgba(75,85,99,0.2)"},
+  safe:   {label:"Safe & Outside",icon:"✅",color:"#22c55e",bg:"rgba(34,197,94,0.12)",  border:"rgba(34,197,94,0.3)"},
+  away:   {label:"Evacuating Now",icon:"🏃",color:"#f59e0b",bg:"rgba(245,158,11,0.12)", border:"rgba(245,158,11,0.3)"},
+  out:    {label:"Not at Work",   icon:"🏠",color:"#3b82f6",bg:"rgba(59,130,246,0.12)", border:"rgba(59,130,246,0.3)"},
+  nothere:{label:"Unknown",       icon:"❓",color:"#9ca3af",bg:"rgba(107,114,128,0.12)",border:"rgba(107,114,128,0.3)"},
+  waiting:{label:"No Response",   icon:"⏳",color:"#4b5563",bg:"rgba(75,85,99,0.08)",  border:"rgba(75,85,99,0.2)"},
 };
 const SORT_ORDER={safe:0,away:1,out:2,nothere:3,waiting:4};
 
-// ── DB ────────────────────────────────────────────────────────────────────────
-async function dbRead(){
-  try{
-    const r=await fetch("https://api.jsonbin.io/v3/b/"+BIN_ID+"/latest",{headers:{"X-Master-Key":API_KEY}});
-    if(!r.ok)return null;
-    return(await r.json()).record;
-  }catch(e){return null;}
-}
-async function dbWrite(data){
-  try{
-    await fetch("https://api.jsonbin.io/v3/b/"+BIN_ID,{
-      method:"PUT",
-      headers:{"Content-Type":"application/json","X-Master-Key":API_KEY},
-      body:JSON.stringify({...data,updatedAt:Date.now()})
-    });
-  }catch(e){}
-}
+// access levels
+const ACCESS={NONE:0,TEAMMATE:1,COORDINATOR:2,ADMIN:3};
 
-// ── SMS ───────────────────────────────────────────────────────────────────────
-async function sendSMS(toNumbers,message,creds){
-  const{accountSid,authToken,fromNumber}=creds;
-  return Promise.allSettled(toNumbers.map(to=>
-    fetch("https://api.twilio.com/2010-04-01/Accounts/"+accountSid+"/Messages.json",{
-      method:"POST",
-      headers:{"Authorization":"Basic "+btoa(accountSid+":"+authToken),"Content-Type":"application/x-www-form-urlencoded"},
-      body:new URLSearchParams({To:to,From:fromNumber,Body:message}).toString(),
-    }).then(r=>r.json())
-  ));
-}
+async function dbRead(){try{const r=await fetch("https://api.jsonbin.io/v3/b/"+BIN_ID+"/latest",{headers:{"X-Master-Key":API_KEY}});if(!r.ok)return null;return(await r.json()).record;}catch(e){return null;}}
+async function dbWrite(data){try{await fetch("https://api.jsonbin.io/v3/b/"+BIN_ID,{method:"PUT",headers:{"Content-Type":"application/json","X-Master-Key":API_KEY},body:JSON.stringify({...data,updatedAt:Date.now()})});}catch(e){}}
+async function sendOneSMS(to,body,creds){return fetch("https://api.twilio.com/2010-04-01/Accounts/"+creds.sid+"/Messages.json",{method:"POST",headers:{"Authorization":"Basic "+btoa(creds.sid+":"+creds.token),"Content-Type":"application/x-www-form-urlencoded"},body:new URLSearchParams({To:to,From:creds.from,Body:body}).toString()}).then(r=>r.json());}
 
-// ── AUDIO ─────────────────────────────────────────────────────────────────────
 let audioCtx=null;
 function getCtx(){if(!audioCtx)audioCtx=new(window.AudioContext||window.webkitAudioContext)();if(audioCtx.state==="suspended")audioCtx.resume();return audioCtx;}
 function playAlarm(){try{const c=getCtx();[0,0.55,1.1].forEach(off=>{[0,0.08,0.16].forEach(t=>{const o=c.createOscillator(),g=c.createGain();o.connect(g);g.connect(c.destination);o.frequency.value=t===0.08?1200:880;o.type="square";g.gain.setValueAtTime(0,c.currentTime+off+t);g.gain.linearRampToValueAtTime(0.18,c.currentTime+off+t+0.01);g.gain.linearRampToValueAtTime(0,c.currentTime+off+t+0.07);o.start(c.currentTime+off+t);o.stop(c.currentTime+off+t+0.1);});})}catch(e){}}
 function playPing(){try{const c=getCtx(),o=c.createOscillator(),g=c.createGain();o.connect(g);g.connect(c.destination);o.frequency.value=1400;o.type="sine";g.gain.setValueAtTime(0,c.currentTime);g.gain.linearRampToValueAtTime(0.12,c.currentTime+0.01);g.gain.exponentialRampToValueAtTime(0.001,c.currentTime+0.4);o.start(c.currentTime);o.stop(c.currentTime+0.5);}catch(e){}}
 function playEnd(){try{const c=getCtx();[0,0.15,0.3].forEach((t,i)=>{const o=c.createOscillator(),g=c.createGain();o.connect(g);g.connect(c.destination);o.frequency.value=[523,659,784][i];o.type="sine";g.gain.setValueAtTime(0,c.currentTime+t);g.gain.linearRampToValueAtTime(0.12,c.currentTime+t+0.02);g.gain.exponentialRampToValueAtTime(0.001,c.currentTime+t+0.3);o.start(c.currentTime+t);o.stop(c.currentTime+t+0.35);});}catch(e){}}
 
-// ── COMPONENTS ────────────────────────────────────────────────────────────────
 const{useState,useEffect,useRef,useCallback}=React;
+function Avatar({name,color,bg,size=40}){return React.createElement("div",{style:{width:size,height:size,borderRadius:"50%",background:bg,color,border:"2px solid "+color,display:"flex",alignItems:"center",justifyContent:"center",fontWeight:800,fontSize:size*0.34,flexShrink:0,fontFamily:"'Space Mono',monospace"}},initials(name));}
 
-function Avatar({name,color,bg,size=40}){
-  return React.createElement("div",{style:{width:size,height:size,borderRadius:"50%",background:bg,color,border:"2px solid "+color,display:"flex",alignItems:"center",justifyContent:"center",fontWeight:800,fontSize:size*0.34,flexShrink:0,fontFamily:"'Space Mono',monospace"}},initials(name));
+// ── LOCK SCREEN ───────────────────────────────────────────────────────────────
+function LockScreen({shared,onUnlock,isFirstSetup}){
+  const[pin,setPin]=useState("");
+  const[err,setErr]=useState("");
+  const[mode,setMode]=useState("enter"); // enter | setAdmin | setCoord
+  const[newPin,setNewPin]=useState("");
+  const[confirmPin,setConfirmPin]=useState("");
+  const h=React.createElement;
+
+  const tryUnlock=(p)=>{
+    const hp=hashPin(p||pin);
+    if(shared.adminPinHash&&hp===shared.adminPinHash){onUnlock(ACCESS.ADMIN);return;}
+    if(shared.coordPinHash&&hp===shared.coordPinHash){onUnlock(ACCESS.COORDINATOR);return;}
+    setErr("Incorrect PIN");setPin("");
+  };
+
+  // first time — no pins set yet
+  if(isFirstSetup) return h("div",{className:"lock-screen"},
+    h("div",{className:"lock-box"},
+      h("div",{className:"lock-logo"},h("span",{className:"flame"},"🔥"),h("h1",null,"Fire",h("span",null,"Check"))),
+      h("div",{className:"lock-title"},"Welcome to FireCheck"),
+      h("p",{className:"lock-sub"},"Set up your Admin and Coordinator PINs to get started. These PINs protect access to the app."),
+      mode==="enter"&&h("div",{className:"lock-actions"},
+        h("button",{className:"lock-btn admin",onClick:()=>setMode("setAdmin")},"🔐 Set Admin PIN",h("span",null,"Manages phone book & app settings")),
+        h("button",{className:"lock-btn coord",onClick:()=>setMode("setCoord")},"🎛️ Set Coordinator PIN",h("span",null,"Starts and ends drills"))
+      ),
+      (mode==="setAdmin"||mode==="setCoord")&&h("div",null,
+        h("div",{className:"lock-pin-label"},mode==="setAdmin"?"🔐 SET ADMIN PIN":"🎛️ SET COORDINATOR PIN"),
+        h("input",{className:"lock-pin-input",type:"password",inputMode:"numeric",maxLength:8,placeholder:"Choose PIN…",value:newPin,onChange:e=>{setNewPin(e.target.value.replace(/\D/g,""));setErr("");}}),
+        h("div",{className:"lock-pin-label",style:{marginTop:12}},"CONFIRM PIN"),
+        h("input",{className:"lock-pin-input",type:"password",inputMode:"numeric",maxLength:8,placeholder:"Confirm PIN…",value:confirmPin,onChange:e=>{setConfirmPin(e.target.value.replace(/\D/g,""));setErr("");},onKeyDown:e=>e.key==="Enter"&&(()=>{
+          if(newPin.length<4){setErr("Min 4 digits");return;}
+          if(newPin!==confirmPin){setErr("PINs don't match");return;}
+          onUnlock(mode==="setAdmin"?ACCESS.ADMIN:ACCESS.COORDINATOR,newPin,mode==="setAdmin"?"admin":"coord");
+        })()}),
+        h("div",{className:"lock-error"},err),
+        h("button",{className:"lock-btn-primary",onClick:()=>{
+          if(newPin.length<4){setErr("Min 4 digits");return;}
+          if(newPin!==confirmPin){setErr("PINs don't match");return;}
+          onUnlock(mode==="setAdmin"?ACCESS.ADMIN:ACCESS.COORDINATOR,newPin,mode==="setAdmin"?"admin":"coord");
+        }},"Save & Enter"),
+        h("button",{className:"lock-back",onClick:()=>{setMode("enter");setNewPin("");setConfirmPin("");setErr("");}},"← Back")
+      )
+    )
+  );
+
+  // normal lock screen
+  return h("div",{className:"lock-screen"},
+    h("div",{className:"lock-box"},
+      h("div",{className:"lock-logo"},h("span",{className:"flame"},"🔥"),h("h1",null,"Fire",h("span",null,"Check"))),
+      h("div",{className:"lock-icon"},"🔒"),
+      h("div",{className:"lock-title"},"Restricted Access"),
+      h("p",{className:"lock-sub"},"Enter your Coordinator or Admin PIN to access the app."),
+      h("div",{className:"lock-pin-label"},"ENTER PIN"),
+      h("input",{className:"lock-pin-input",type:"password",inputMode:"numeric",maxLength:8,placeholder:"••••",value:pin,onChange:e=>{setPin(e.target.value.replace(/\D/g,""));setErr("");},onKeyDown:e=>e.key==="Enter"&&tryUnlock(),autoFocus:true}),
+      h("div",{className:"lock-error"},err),
+      h("button",{className:"lock-btn-primary",onClick:()=>tryUnlock()},"Unlock"),
+      h("div",{className:"lock-hint"},"Only Coordinators and Admins can access this app.")
+    )
+  );
 }
 
+// ── MAIN APP ──────────────────────────────────────────────────────────────────
 function App(){
   const urlName=getUrlName();
-
-  // core state
-  const[shared,setShared]=useState({members:[],phonebook:[],drillActive:false,drillStartedAt:null,pingedAt:{},pinHash:null,history:[]});
-  const[me,setMe]=useState(()=>{
-    const saved=LS.get("fc:me");
-    if(urlName&&(!saved||saved.name!==urlName)) return null; // force re-join if URL name differs
-    return saved;
-  });
+  const[shared,setShared]=useState(null); // null = loading
+  const[accessLevel,setAccessLevel]=useState(ACCESS.NONE);
+  const[me,setMe]=useState(()=>LS.get("fc:me"));
   const[nameInput,setNameInput]=useState(urlName||"");
   const[roleInput,setRoleInput]=useState("");
   const[phoneInput,setPhoneInput]=useState("");
   const[noteInput,setNoteInput]=useState("");
-
-  // coordinator
-  const[isCoord,setIsCoord]=useState(false);
-  const[showSetPin,setShowSetPin]=useState(false);
-  const[showUnlock,setShowUnlock]=useState(false);
-  const[newPin,setNewPin]=useState("");
-  const[confirmPin,setConfirmPin]=useState("");
-  const[pinInput,setPinInput]=useState("");
+  const[modal,setModal]=useState(null);
   const[pinError,setPinError]=useState("");
-
-  // tabs
-  const[activeTab,setActiveTab]=useState("live"); // live | phonebook | history
-
-  // phonebook editor
+  const[editTarget,setEditTarget]=useState(null);
+  const[activeTab,setActiveTab]=useState("live");
   const[pbName,setPbName]=useState("");
   const[pbRole,setPbRole]=useState("");
   const[pbPhone,setPbPhone]=useState("");
-
-  // twilio
   const[showConfig,setShowConfig]=useState(false);
   const[twSid,setTwSid]=useState(()=>{const c=LS.get("fc:twilio");return c?.accountSid||"";});
   const[twToken,setTwToken]=useState(()=>{const c=LS.get("fc:twilio");return c?.authToken||"";});
   const[twFrom,setTwFrom]=useState(()=>{const c=LS.get("fc:twilio");return c?.fromNumber||"";});
   const[smsLog,setSmsLog]=useState([]);
   const[sendingCount,setSendingCount]=useState(0);
-
-  // ui
   const[alertFlash,setAlertFlash]=useState(false);
   const[elapsed,setElapsed]=useState("00:00");
   const[toast,setToast]=useState(null);
   const[syncing,setSyncing]=useState(false);
-  const[showEndConfirm,setShowEndConfirm]=useState(false);
   const[,forceRender]=useState(0);
   const prevDrillRef=useRef(false);
   const toastRef=useRef(null);
   const writingRef=useRef(false);
 
-  const showToast=useCallback((msg)=>{
-    setToast(msg);clearTimeout(toastRef.current);
-    toastRef.current=setTimeout(()=>setToast(null),3200);
-  },[]);
+  const showToast=useCallback((msg)=>{setToast(msg);clearTimeout(toastRef.current);toastRef.current=setTimeout(()=>setToast(null),3200);},[]);
+  const closeModal=useCallback(()=>{setModal(null);setPinError("");},[]);
+  const isCoord=accessLevel>=ACCESS.COORDINATOR;
+  const isAdmin=accessLevel>=ACCESS.ADMIN;
 
-  const readDb=useCallback(async()=>await dbRead(),[]);
-  const writeDb=useCallback(async(data)=>{
-    if(writingRef.current)return;
-    writingRef.current=true;
-    await dbWrite(data);
-    writingRef.current=false;
-  },[]);
-
-  // ── POLL ────────────────────────────────────────────────────────────────
+  // ── INITIAL LOAD ──────────────────────────────────────────────────────
   useEffect(()=>{
+    dbRead().then(s=>{
+      setShared({members:[],phonebook:[],history:[],pingedAt:{},...(s||{})});
+    });
+  },[]);
+
+  // ── POLL ──────────────────────────────────────────────────────────────
+  useEffect(()=>{
+    if(!shared||accessLevel===ACCESS.NONE)return;
     const poll=async()=>{
-      setSyncing(true);
-      const s=await readDb();
-      setSyncing(false);
-      if(!s)return;
-      const wasActive=prevDrillRef.current;
-      const isNow=s.drillActive;
+      setSyncing(true);const s=await dbRead();setSyncing(false);if(!s)return;
+      const wasActive=prevDrillRef.current;const isNow=s.drillActive;
       if(!wasActive&&isNow){setAlertFlash(true);playAlarm();setTimeout(()=>setAlertFlash(false),3000);}
       if(wasActive&&!isNow)playEnd();
       prevDrillRef.current=isNow;
-      setShared({...s,history:s.history||[],phonebook:s.phonebook||[]});
+      setShared({members:[],phonebook:[],history:[],pingedAt:{},...s});
     };
-    poll();
-    const id=setInterval(poll,4000);
-    const tk=setInterval(()=>forceRender(n=>n+1),15000);
+    poll();const id=setInterval(poll,4000);const tk=setInterval(()=>forceRender(n=>n+1),15000);
     return()=>{clearInterval(id);clearInterval(tk);};
-  },[readDb]);
+  },[shared&&accessLevel>0]);// eslint-disable-line
 
-  // ── TIMER ────────────────────────────────────────────────────────────────
   useEffect(()=>{
-    if(!shared.drillActive||!shared.drillStartedAt){setElapsed("00:00");return;}
-    const t=setInterval(()=>{
-      const s=Math.floor((Date.now()-shared.drillStartedAt)/1000);
-      setElapsed(String(Math.floor(s/60)).padStart(2,"0")+":"+String(s%60).padStart(2,"0"));
-    },1000);
+    if(!shared?.drillActive||!shared?.drillStartedAt){setElapsed("00:00");return;}
+    const t=setInterval(()=>{const s=Math.floor((Date.now()-shared.drillStartedAt)/1000);setElapsed(String(Math.floor(s/60)).padStart(2,"0")+":"+String(s%60).padStart(2,"0"));},1000);
     return()=>clearInterval(t);
-  },[shared.drillActive,shared.drillStartedAt]);
+  },[shared?.drillActive,shared?.drillStartedAt]);
 
-  // ── JOIN ─────────────────────────────────────────────────────────────────
+  const writeDb=useCallback(async(data)=>{if(writingRef.current)return;writingRef.current=true;await dbWrite(data);writingRef.current=false;},[]);
+
+  // ── UNLOCK / FIRST SETUP ──────────────────────────────────────────────
+  const handleUnlock=useCallback(async(level,newPinVal,pinType)=>{
+    if(newPinVal&&pinType){
+      // First-time setup — save new PIN to DB
+      const s=await dbRead();
+      const patch=pinType==="admin"?{adminPinHash:hashPin(newPinVal)}:{coordPinHash:hashPin(newPinVal)};
+      const next={members:[],phonebook:[],history:[],pingedAt:{},...(s||{}),...patch};
+      setShared(next);await dbWrite(next);
+      setAccessLevel(level);
+      showToast(pinType==="admin"?"🔐 Admin PIN set!":"🎛️ Coordinator PIN set!");
+    } else {
+      setAccessLevel(level);
+    }
+  },[showToast]);
+
+  // ── JOIN ──────────────────────────────────────────────────────────────
   const join=async()=>{
-    const name=nameInput.trim();
-    if(!name){showToast("Please enter your name");return;}
-    // check phonebook for existing phone
-    const pb=(shared.phonebook||[]);
+    const name=nameInput.trim();if(!name){showToast("Please enter your name");return;}
+    const pb=shared?.phonebook||[];
     const pbEntry=pb.find(p=>p.name.toLowerCase()===name.toLowerCase());
     const phone=phoneInput.trim()||pbEntry?.phone||"";
     const role=roleInput.trim()||pbEntry?.role||"Team Member";
     const user={name,role,phone,status:"waiting",note:"",ts:Date.now()};
     setMe(user);LS.set("fc:me",user);
-    const s=await readDb();
-    const cur=s?.members||[];
-    const idx=cur.findIndex(m=>m.name===name);
-    if(idx>=0)cur[idx]=user;else cur.unshift(user);
-    const next={...s,members:cur,phonebook:s?.phonebook||[],history:s?.history||[]};
-    setShared(next);await writeDb(next);
+    const s=await dbRead();const cur=s?.members||[];
+    const idx=cur.findIndex(m=>m.name===name);if(idx>=0)cur[idx]=user;else cur.unshift(user);
+    const next={...s,members:cur};setShared(prev=>({...prev,members:cur}));await writeDb(next);
     showToast("Welcome, "+name+"! 👋");
   };
 
-  // ── STATUS ────────────────────────────────────────────────────────────────
   const setStatus=useCallback(async(status)=>{
     if(!me)return;
-    const updated={...me,status,ts:Date.now()};
-    setMe(updated);LS.set("fc:me",updated);
-    const s=await readDb();
-    const cur=(s?.members||[]).map(m=>m.name===me.name?updated:m);
-    const next={...s,members:cur};
-    setShared(prev=>({...prev,members:cur}));
-    await writeDb(next);
+    const updated={...me,status,ts:Date.now()};setMe(updated);LS.set("fc:me",updated);
+    const s=await dbRead();const cur=(s?.members||[]).map(m=>m.name===me.name?updated:m);
+    setShared(prev=>({...prev,members:cur}));await writeDb({...s,members:cur});
     showToast(STATUS_META[status].icon+" "+STATUS_META[status].label);
-  },[me,readDb,writeDb,showToast]);
+  },[me,writeDb,showToast]);
 
   const sendNote=useCallback(async()=>{
-    if(!me)return;
-    const updated={...me,note:noteInput.trim(),ts:Date.now()};
-    setMe(updated);LS.set("fc:me",updated);
-    const s=await readDb();
-    const cur=(s?.members||[]).map(m=>m.name===me.name?updated:m);
-    const next={...s,members:cur};
-    setShared(prev=>({...prev,members:cur}));
-    await writeDb(next);
-    showToast("📝 Note sent");
-  },[me,noteInput,readDb,writeDb,showToast]);
+    if(!me)return;const updated={...me,note:noteInput.trim(),ts:Date.now()};setMe(updated);LS.set("fc:me",updated);
+    const s=await dbRead();const cur=(s?.members||[]).map(m=>m.name===me.name?updated:m);
+    setShared(prev=>({...prev,members:cur}));await writeDb({...s,members:cur});showToast("📝 Note sent");
+  },[me,noteInput,writeDb,showToast]);
 
-  // ── PIN ───────────────────────────────────────────────────────────────────
-  const handleSetPin=async()=>{
-    if(newPin.length<4){setPinError("PIN must be at least 4 digits");return;}
-    if(newPin!==confirmPin){setPinError("PINs don't match");return;}
-    const hash=hashPin(newPin);
-    const s=await readDb();
-    const next={...s,pinHash:hash};
-    setShared(prev=>({...prev,pinHash:hash}));
-    await writeDb(next);
-    setIsCoord(true);setShowSetPin(false);setNewPin("");setConfirmPin("");setPinError("");
-    showToast("🔐 PIN set! You are now the coordinator.");
-  };
-  const handleUnlock=()=>{
-    if(hashPin(pinInput)===shared.pinHash){
-      setIsCoord(true);setShowUnlock(false);setPinInput("");setPinError("");
-      showToast("🔓 Coordinator access granted");
-    }else{setPinError("Incorrect PIN");setPinInput("");}
+  // ── PIN CHANGE MODALS ─────────────────────────────────────────────────
+  const handleChangePin=async(pin,type)=>{
+    if(pin.length<4){setPinError("Min 4 digits");return;}
+    const hash=hashPin(pin);const s=await dbRead();
+    const patch=type==="admin"?{adminPinHash:hash}:{coordPinHash:hash};
+    const next={...s,...patch};setShared(prev=>({...prev,...patch}));await writeDb(next);
+    closeModal();showToast(type==="admin"?"🔐 Admin PIN updated":"🎛️ Coordinator PIN updated");
   };
 
-  // ── PHONEBOOK ─────────────────────────────────────────────────────────────
+  // ── PHONEBOOK ─────────────────────────────────────────────────────────
   const addToPb=async()=>{
-    const name=pbName.trim();
-    if(!name||!pbPhone.trim()){showToast("Name and phone required");return;}
+    const name=pbName.trim();if(!name||!pbPhone.trim()){showToast("Name and phone required");return;}
     const entry={name,role:pbRole.trim()||"Team Member",phone:pbPhone.trim()};
-    const s=await readDb();
-    const pb=s?.phonebook||[];
-    const idx=pb.findIndex(p=>p.name===name);
-    if(idx>=0)pb[idx]=entry;else pb.push(entry);
-    const next={...s,phonebook:pb};
-    setShared(prev=>({...prev,phonebook:pb}));
-    await writeDb(next);
-    setPbName("");setPbRole("");setPbPhone("");
-    showToast("✅ "+name+" added to phone book");
+    const s=await dbRead();const pb=s?.phonebook||[];
+    const idx=pb.findIndex(p=>p.name===name);if(idx>=0)pb[idx]=entry;else pb.push(entry);
+    const next={...s,phonebook:pb};setShared(prev=>({...prev,phonebook:pb}));await writeDb(next);
+    setPbName("");setPbRole("");setPbPhone("");showToast("✅ "+name+" added");
   };
-
   const removeFromPb=async(name)=>{
-    const s=await readDb();
-    const pb=(s?.phonebook||[]).filter(p=>p.name!==name);
-    const next={...s,phonebook:pb};
-    setShared(prev=>({...prev,phonebook:pb}));
-    await writeDb(next);
-    showToast("🗑️ Removed "+name);
+    const s=await dbRead();const pb=(s?.phonebook||[]).filter(p=>p.name!==name);
+    const next={...s,phonebook:pb};setShared(prev=>({...prev,phonebook:pb}));await writeDb(next);showToast("🗑️ Removed "+name);
+  };
+  const saveEdit=async()=>{
+    if(!editTarget)return;
+    const s=await dbRead();const pb=(s?.phonebook||[]).map(p=>p.name===editTarget._origName?{name:editTarget.name.trim(),role:editTarget.role.trim(),phone:editTarget.phone.trim()}:p);
+    const next={...s,phonebook:pb};setShared(prev=>({...prev,phonebook:pb}));await writeDb(next);
+    closeModal();setEditTarget(null);showToast("✅ "+editTarget.name+" updated");
   };
 
-  // ── SMS ───────────────────────────────────────────────────────────────────
-  const blastSMS=useCallback(async(targets,message)=>{
-    if(!twSid||!twToken||!twFrom)return;
-    const withPhone=targets.filter(m=>m.phone);
-    if(!withPhone.length){showToast("⚠️ No phone numbers found");return;}
+  // ── SMS ────────────────────────────────────────────────────────────────
+  const creds=useCallback(()=>({sid:twSid,token:twToken,from:fmtPhone(twFrom)}),[twSid,twToken,twFrom]);
+  const blastPersonalized=useCallback(async(targets)=>{
+    if(!twSid||!twToken||!twFrom)return 0;
+    const withPhone=targets.filter(p=>p.phone);if(!withPhone.length)return 0;
     setSendingCount(withPhone.length);
-    const results=await sendSMS(withPhone.map(m=>fmtPhone(m.phone)),message,{accountSid:twSid,authToken:twToken,fromNumber:fmtPhone(twFrom)});
+    const results=await Promise.allSettled(withPhone.map(p=>sendOneSMS(fmtPhone(p.phone),"🔥 FIRE DRILL STARTED\nTap to report your status:\n"+APP_URL+"?name="+encodeURIComponent(p.name)+"\n\n— FireCheck",creds())));
     setSendingCount(0);
-    const log=withPhone.map((m,i)=>({ts:Date.now(),name:m.name,to:fmtPhone(m.phone),status:results[i].status==="fulfilled"&&!results[i].value?.error_code?"sent":"failed"}));
+    const log=withPhone.map((p,i)=>({ts:Date.now(),name:p.name,to:fmtPhone(p.phone),status:results[i].status==="fulfilled"&&!results[i].value?.error_code?"sent":"failed"}));
     setSmsLog(prev=>[...log,...prev].slice(0,50));
-    const sent=log.filter(l=>l.status==="sent").length;
-    const fail=log.filter(l=>l.status==="failed").length;
-    showToast("📱 SMS: "+sent+" sent"+(fail?", "+fail+" failed":""));
-  },[twSid,twToken,twFrom,showToast]);
+    return log.filter(l=>l.status==="sent").length;
+  },[twSid,twToken,twFrom,creds]);
 
-  // ── DRILL ─────────────────────────────────────────────────────────────────
+  const blastAllClear=useCallback(async(targets)=>{
+    if(!twSid||!twToken||!twFrom)return;
+    await Promise.allSettled(targets.filter(p=>p.phone).map(p=>sendOneSMS(fmtPhone(p.phone),"✅ Fire drill ended. All clear! — FireCheck",creds())));
+  },[twSid,twToken,twFrom,creds]);
+
+  // ── DRILL ─────────────────────────────────────────────────────────────
   const startDrill=async()=>{
-    const now=Date.now();
-    const s=await readDb();
-    const pb=s?.phonebook||[];
-
-    // build members from phonebook — everyone starts as "waiting"
-    // keep existing members who are already in but reset their status
-    const existingNames=(s?.members||[]).map(m=>m.name);
-    const pbMembers=pb.map(p=>({
-      name:p.name,role:p.role,phone:p.phone,
-      status:"waiting",note:"",ts:now
-    }));
-    // merge: phonebook members + any existing members not in phonebook
+    if(!isCoord){showToast("🔒 Coordinator access required");return;}
+    const now=Date.now();const s=await dbRead();const pb=s?.phonebook||[];
+    const pbMembers=pb.map(p=>({name:p.name,role:p.role,phone:p.phone,status:"waiting",note:"",ts:now}));
     const extra=(s?.members||[]).filter(m=>!pb.find(p=>p.name===m.name)).map(m=>({...m,status:"waiting",note:"",ts:now}));
-    const allMembers=[...pbMembers,...extra];
-
     prevDrillRef.current=false;
-    const next={...s,members:allMembers,drillActive:true,drillStartedAt:now,pingedAt:{},history:s?.history||[]};
+    const next={...s,members:[...pbMembers,...extra],drillActive:true,drillStartedAt:now,pingedAt:{}};
     setShared(next);await writeDb(next);
     setAlertFlash(true);playAlarm();setTimeout(()=>setAlertFlash(false),3000);
-
-    // SMS everyone in phonebook with personalized link
-    const smsTargets=pb.map(p=>({
-      ...p,
-      // personalized link with name pre-filled
-      _msg:"🔥 FIRE DRILL STARTED\nTap to report your status now:\n"+APP_URL+"?name="+encodeURIComponent(p.name)+"\n\n— FireCheck"
-    }));
-
-    // send individually with personalized links
-    if(twSid&&twToken&&twFrom){
-      setSendingCount(smsTargets.length);
-      const results=await Promise.allSettled(
-        smsTargets.filter(p=>p.phone).map(p=>
-          fetch("https://api.twilio.com/2010-04-01/Accounts/"+twSid+"/Messages.json",{
-            method:"POST",
-            headers:{"Authorization":"Basic "+btoa(twSid+":"+twToken),"Content-Type":"application/x-www-form-urlencoded"},
-            body:new URLSearchParams({To:fmtPhone(p.phone),From:fmtPhone(twFrom),Body:p._msg}).toString(),
-          }).then(r=>r.json())
-        )
-      );
-      setSendingCount(0);
-      const withPhone=smsTargets.filter(p=>p.phone);
-      const log=withPhone.map((p,i)=>({ts:Date.now(),name:p.name,to:fmtPhone(p.phone),status:results[i].status==="fulfilled"&&!results[i].value?.error_code?"sent":"failed"}));
-      setSmsLog(prev=>[...log,...prev].slice(0,50));
-      const sent=log.filter(l=>l.status==="sent").length;
-      showToast("🔔 Drill started! SMS sent to "+sent+" teammates");
-    } else {
-      showToast("🔔 Drill started! (Setup SMS to send alerts)");
-    }
+    const sent=await blastPersonalized(pb);
+    showToast("🔔 Drill started! SMS sent to "+sent+" teammates");
   };
 
-  // ── END DRILL (with history save) ─────────────────────────────────────────
-  const endDrill=async()=>{
-    const s=await readDb();
-    // save snapshot to history BEFORE ending
-    const snapshot={
-      id:Date.now(),
-      startedAt:s?.drillStartedAt||Date.now(),
-      endedAt:Date.now(),
-      members:(s?.members||[]).map(m=>({...m})), // deep copy
-      summary:{
-        safe:(s?.members||[]).filter(m=>m.status==="safe").length,
-        away:(s?.members||[]).filter(m=>m.status==="away").length,
-        out:(s?.members||[]).filter(m=>m.status==="out").length,
-        nothere:(s?.members||[]).filter(m=>m.status==="nothere").length,
-        waiting:(s?.members||[]).filter(m=>m.status==="waiting").length,
-        total:(s?.members||[]).length,
-      }
-    };
-    const history=[snapshot,...(s?.history||[])].slice(0,10); // keep last 10 drills
+  const confirmEndDrill=async()=>{
+    if(!isCoord){showToast("🔒 Coordinator access required");return;}
+    const s=await dbRead();
+    const snapshot={id:Date.now(),startedAt:s?.drillStartedAt||Date.now(),endedAt:Date.now(),members:(s?.members||[]).map(m=>({...m})),summary:{safe:(s?.members||[]).filter(m=>m.status==="safe").length,away:(s?.members||[]).filter(m=>m.status==="away").length,out:(s?.members||[]).filter(m=>m.status==="out").length,nothere:(s?.members||[]).filter(m=>m.status==="nothere").length,waiting:(s?.members||[]).filter(m=>m.status==="waiting").length,total:(s?.members||[]).length}};
+    const history=[snapshot,...(s?.history||[])].slice(0,10);
     prevDrillRef.current=true;
     const next={...s,drillActive:false,drillStartedAt:null,history};
-    setShared(next);await writeDb(next);
-    playEnd();
-    // send all-clear to phonebook
-    await blastSMS(s?.phonebook||[],"✅ Fire drill ended. All clear! — FireCheck");
-    setShowEndConfirm(false);
-    showToast("✅ Drill ended & saved to history!");
+    setShared(next);await writeDb(next);playEnd();
+    await blastAllClear(s?.phonebook||[]);
+    closeModal();showToast("✅ Drill ended & saved to history!");
   };
 
   const pingMember=async(member)=>{
-    playPing();
-    const s=await readDb();
+    if(!isCoord)return;
+    playPing();const s=await dbRead();
     const pings={...(s?.pingedAt||{}),[member.name]:Date.now()};
-    const next={...s,pingedAt:pings};
-    setShared(prev=>({...prev,pingedAt:pings}));
-    await writeDb(next);
-    if(member.phone){
-      const msg="📣 "+member.name+", the coordinator needs your fire drill status!\n"+APP_URL+"?name="+encodeURIComponent(member.name)+"\n\n— FireCheck";
-      await sendSMS([fmtPhone(member.phone)],msg,{accountSid:twSid,authToken:twToken,fromNumber:fmtPhone(twFrom)});
-    }
+    setShared(prev=>({...prev,pingedAt:pings}));await writeDb({...s,pingedAt:pings});
+    if(member.phone&&twSid&&twToken&&twFrom) await sendOneSMS(fmtPhone(member.phone),"📣 "+member.name+", the coordinator needs your fire drill status!\n"+APP_URL+"?name="+encodeURIComponent(member.name)+"\n\n— FireCheck",creds());
     showToast("📣 Pinged "+member.name);
   };
 
-  // ── RENDER HELPERS ────────────────────────────────────────────────────────
+  // ── LOADING ───────────────────────────────────────────────────────────
+  if(shared===null) return React.createElement("div",{style:{minHeight:"100vh",background:"#090909",display:"flex",alignItems:"center",justifyContent:"center",fontFamily:"'Space Mono',monospace",color:"#333",fontSize:13}},"Loading FireCheck…");
+
+  // ── LOCK SCREEN ───────────────────────────────────────────────────────
+  const isFirstSetup=!shared.adminPinHash&&!shared.coordPinHash;
+  if(accessLevel===ACCESS.NONE){
+    // teammates arriving via SMS link bypass lock — they only see their status panel
+    if(urlName&&!isFirstSetup) {
+      // show simplified teammate view
+    } else {
+      return React.createElement(LockScreen,{shared,onUnlock:handleUnlock,isFirstSetup});
+    }
+  }
+
   const stats=(shared.members||[]).reduce((a,m)=>{a[m.status]=(a[m.status]||0)+1;return a;},{});
   const sorted=[...(shared.members||[])].sort((a,b)=>(SORT_ORDER[a.status]??4)-(SORT_ORDER[b.status]??4));
   const twilioReady=!!(twSid&&twToken&&twFrom);
-  const pinIsSet=!!shared.pinHash;
   const h=React.createElement;
 
-  // ── MODALS ────────────────────────────────────────────────────────────────
-  const modals=[];
-
-  if(showSetPin) modals.push(
-    h("div",{key:"sp",className:"overlay",onClick:e=>e.target===e.currentTarget&&setShowSetPin(false)},
-      h("div",{className:"modal"},
-        h("button",{className:"modal-close",onClick:()=>setShowSetPin(false)},"×"),
-        h("h2",null,"🔐 Set Coordinator PIN"),
-        h("p",null,"Only you will be able to start or end drills."),
-        h("div",{className:"cfg-lbl",style:{marginBottom:6}},"CHOOSE A PIN (min 4 digits)"),
-        h("input",{className:"pin-input",type:"password",inputMode:"numeric",maxLength:8,placeholder:"••••",value:newPin,onChange:e=>setNewPin(e.target.value.replace(/\D/g,"")),onKeyDown:e=>e.key==="Enter"&&document.getElementById("cp2").focus()}),
-        h("div",{className:"cfg-lbl",style:{margin:"12px 0 6px"}},"CONFIRM PIN"),
-        h("input",{id:"cp2",className:"pin-input",type:"password",inputMode:"numeric",maxLength:8,placeholder:"••••",value:confirmPin,onChange:e=>setConfirmPin(e.target.value.replace(/\D/g,"")),onKeyDown:e=>e.key==="Enter"&&handleSetPin()}),
-        h("div",{className:"pin-error"},pinError),
-        h("button",{className:"btn-primary",style:{width:"100%",marginTop:10},onClick:handleSetPin},"Set PIN & Become Coordinator"),
-        h("div",{className:"modal-hint"},"⚠️ Write your PIN down — there is no forgot PIN option.")
-      )
-    )
-  );
-
-  if(showUnlock) modals.push(
-    h("div",{key:"ul",className:"overlay",onClick:e=>e.target===e.currentTarget&&(setShowUnlock(false),setPinInput(""),setPinError(""))},
-      h("div",{className:"modal"},
-        h("button",{className:"modal-close",onClick:()=>{setShowUnlock(false);setPinInput("");setPinError("");}},"×"),
-        h("h2",null,"🔓 Coordinator Login"),
-        h("p",null,"Enter your coordinator PIN to unlock drill controls."),
-        h("input",{className:"pin-input",type:"password",inputMode:"numeric",maxLength:8,placeholder:"••••",value:pinInput,onChange:e=>setPinInput(e.target.value.replace(/\D/g,"")),onKeyDown:e=>e.key==="Enter"&&handleUnlock(),autoFocus:true}),
-        h("div",{className:"pin-error"},pinError),
-        h("button",{className:"btn-primary",style:{width:"100%",marginTop:10},onClick:handleUnlock},"Unlock")
-      )
-    )
-  );
-
-  // end drill confirmation
-  if(showEndConfirm) modals.push(
-    h("div",{key:"ec",className:"overlay",onClick:e=>e.target===e.currentTarget&&setShowEndConfirm(false)},
-      h("div",{className:"modal"},
-        h("button",{className:"modal-close",onClick:()=>setShowEndConfirm(false)},"×"),
-        h("h2",null,"✅ End Drill?"),
-        h("p",null,"This will save the current drill results to history and send an all-clear SMS to all teammates."),
-        h("div",{style:{background:"#0d0d0d",borderRadius:10,padding:"14px 16px",marginBottom:16}},
-          h("div",{style:{fontFamily:"'Space Mono',monospace",fontSize:11,color:"#444",marginBottom:10}},"CURRENT DRILL SNAPSHOT"),
-          h("div",{style:{display:"grid",gridTemplateColumns:"1fr 1fr",gap:8}},
-            [{label:"✅ Safe",val:stats.safe||0,color:"#22c55e"},
-             {label:"🏃 Evacuating",val:stats.away||0,color:"#f59e0b"},
-             {label:"🏠 Not in",val:stats.out||0,color:"#3b82f6"},
-             {label:"⏳ No response",val:(stats.waiting||0)+(stats.nothere||0),color:"#555"},
-            ].map(({label,val,color})=>
-              h("div",{key:label,style:{background:"#141414",borderRadius:8,padding:"10px 12px"}},
-                h("div",{style:{fontSize:18,fontWeight:800,color,fontFamily:"'Space Mono',monospace"}},val),
-                h("div",{style:{fontSize:11,color:"#444",marginTop:2}},label)
+  // ── TEAMMATE VIEW (via SMS link) ──────────────────────────────────────
+  if(accessLevel===ACCESS.NONE&&urlName){
+    return h("div",{style:{minHeight:"100vh",background:"#090909",color:"#f0ede8",fontFamily:"'Syne',sans-serif",display:"flex",alignItems:"center",justifyContent:"center",padding:20}},
+      shared.drillActive&&h("div",{className:"drill-banner",style:{position:"fixed",top:0,left:0,right:0}},"🔥 FIRE DRILL IN PROGRESS",h("span",{className:"drill-timer"},elapsed),"🔥"),
+      h("div",{style:{width:"100%",maxWidth:480,marginTop:shared.drillActive?60:0}},
+        h("div",{style:{textAlign:"center",marginBottom:24}},
+          h("div",{style:{fontSize:32,marginBottom:8}},"🔥"),
+          h("h1",{style:{fontSize:20,fontWeight:800}},"Fire",h("span",{style:{color:"#ff4d2e"}},"Check")),
+          h("p",{style:{fontSize:13,color:"#555",marginTop:4}},shared.drillActive?"🚨 Fire drill in progress — report your status":"No active drill right now")
+        ),
+        h("div",{className:"card"},
+          h("div",{className:"lbl"},"// your status"),
+          me&&h("div",{className:"user-row"},
+            h(Avatar,{name:me.name,color:STATUS_META[me.status]?.color||"#555",bg:STATUS_META[me.status]?.bg||"#1a1a1a",size:44}),
+            h("div",{className:"user-info"},h("h2",null,me.name),h("p",null,me.role))
+          ),
+          !me
+            ?h("div",null,
+              h("div",{className:"input-row"},
+                h("input",{className:"inp",placeholder:"Your name…",value:nameInput,onChange:e=>setNameInput(e.target.value),onKeyDown:e=>e.key==="Enter"&&join(),maxLength:30}),
+                h("input",{className:"inp",placeholder:"Role…",value:roleInput,onChange:e=>setRoleInput(e.target.value),maxLength:40,style:{maxWidth:140}})
+              ),
+              h("button",{className:"btn-primary",style:{width:"100%"},onClick:join},"Join & Report Status"),
+              urlName&&h("div",{style:{fontSize:11,color:"#22c55e",fontFamily:"'Space Mono',monospace",marginTop:8}},"✅ Name pre-filled from your SMS link")
+            )
+            :h("div",null,
+              h("div",{className:"status-grid"},
+                [{key:"safe",label:"I'm Safe & Outside",sub:"Evacuated, at muster point"},
+                 {key:"away",label:"Evacuating Now",sub:"Still making my way out"},
+                 {key:"out",label:"Not at Work Today",sub:"WFH, PTO, or off-site"},
+                 {key:"nothere",label:"Can't Respond",sub:"Unsure / phone issue"}
+                ].map(({key,label,sub})=>{
+                  const m=STATUS_META[key],active=me.status===key;
+                  return h("button",{key,className:"s-btn"+(active?" active":""),style:active?{borderColor:m.color,background:m.bg}:{},onClick:()=>setStatus(key)},
+                    h("span",{className:"s-icon"},m.icon),h("div",null,label,h("span",{className:"s-sub"},sub))
+                  );
+                })
+              ),
+              me.status!=="waiting"&&h("div",{style:{marginTop:14,padding:"12px 16px",background:"rgba(34,197,94,0.08)",border:"1px solid rgba(34,197,94,0.2)",borderRadius:10,fontSize:13,color:"#22c55e",fontWeight:700,textAlign:"center"}},"✅ Status reported — you can close this tab"),
+              h("div",{className:"note-row"},
+                h("input",{className:"inp",placeholder:'Add a note… e.g. "At parking lot B"',value:noteInput,onChange:e=>setNoteInput(e.target.value),onKeyDown:e=>e.key==="Enter"&&sendNote(),maxLength:80}),
+                h("button",{className:"btn-primary",onClick:sendNote},"Send")
               )
             )
+        ),
+        h("div",{className:"toast"+(toast?" show":"")},toast)
+      )
+    );
+  }
+
+  // ── FULL APP (coordinator / admin) ────────────────────────────────────
+  return h("div",{className:"root"},
+    alertFlash&&h("div",{className:"flash"}),
+
+    // MODALS
+    modal==="editUser"&&editTarget&&h("div",{className:"overlay",onClick:e=>e.target===e.currentTarget&&closeModal()},
+      h("div",{className:"modal"},
+        h("button",{className:"modal-close",onClick:closeModal},"×"),
+        h("h2",null,"✏️ Edit Teammate"),
+        h("div",{className:"cfg-lbl",style:{marginBottom:6}},"FULL NAME"),h("input",{className:"inp",style:{width:"100%",marginBottom:10},value:editTarget.name,onChange:e=>setEditTarget(t=>({...t,name:e.target.value}))}),
+        h("div",{className:"cfg-lbl",style:{marginBottom:6}},"ROLE"),h("input",{className:"inp",style:{width:"100%",marginBottom:10},value:editTarget.role,onChange:e=>setEditTarget(t=>({...t,role:e.target.value}))}),
+        h("div",{className:"cfg-lbl",style:{marginBottom:6}},"PHONE"),h("input",{className:"inp",style:{width:"100%",marginBottom:16},type:"tel",value:editTarget.phone,onChange:e=>setEditTarget(t=>({...t,phone:e.target.value}))}),
+        h("div",{style:{display:"flex",gap:8}},
+          h("button",{className:"btn-secondary",style:{flex:1},onClick:closeModal},"Cancel"),
+          h("button",{className:"btn-primary",style:{flex:1},onClick:saveEdit},"Save Changes")
+        )
+      )
+    ),
+
+    modal==="endConfirm"&&h("div",{className:"overlay",onClick:e=>e.target===e.currentTarget&&closeModal()},
+      h("div",{className:"modal"},
+        h("button",{className:"modal-close",onClick:closeModal},"×"),
+        h("h2",null,"✅ End Drill?"),
+        h("p",null,"Snapshot saved to history. All-clear SMS sent."),
+        h("div",{style:{background:"#0d0d0d",borderRadius:10,padding:"14px",marginBottom:16}},
+          h("div",{style:{fontFamily:"'Space Mono',monospace",fontSize:11,color:"#444",marginBottom:10}},"CURRENT SNAPSHOT"),
+          h("div",{style:{display:"grid",gridTemplateColumns:"1fr 1fr",gap:8}},
+            [{label:"✅ Safe",val:stats.safe||0,color:"#22c55e"},{label:"🏃 Evacuating",val:stats.away||0,color:"#f59e0b"},
+             {label:"🏠 Not in",val:stats.out||0,color:"#3b82f6"},{label:"⏳ No response",val:(stats.waiting||0)+(stats.nothere||0),color:"#555"}
+            ].map(({label,val,color})=>h("div",{key:label,style:{background:"#141414",borderRadius:8,padding:"10px"}},
+              h("div",{style:{fontSize:18,fontWeight:800,color,fontFamily:"'Space Mono',monospace"}},val),
+              h("div",{style:{fontSize:11,color:"#444",marginTop:2}},label)
+            ))
           )
         ),
         h("div",{style:{display:"flex",gap:8}},
-          h("button",{className:"btn-secondary",style:{flex:1},onClick:()=>setShowEndConfirm(false)},"Cancel"),
-          h("button",{className:"btn-primary",style:{flex:1,background:"#22c55e"},onClick:endDrill},"✅ End & Save Drill")
+          h("button",{className:"btn-secondary",style:{flex:1},onClick:closeModal},"Cancel"),
+          h("button",{className:"btn-primary",style:{flex:1,background:"#22c55e"},onClick:confirmEndDrill},"✅ End & Save")
         )
       )
-    )
-  );
-
-  return h("div",{className:"root"},
-    alertFlash&&h("div",{className:"flash"}),
-    ...modals,
-
-    shared.drillActive&&h("div",{className:"drill-banner"},
-      h("span",null,"🔥"),"FIRE DRILL IN PROGRESS — REPORT YOUR STATUS NOW",
-      h("span",{className:"drill-timer"},elapsed),h("span",null,"🔥")
     ),
+
+    modal==="changeCoordPin"&&h("div",{className:"overlay",onClick:e=>e.target===e.currentTarget&&closeModal()},
+      h("div",{className:"modal"},
+        h("button",{className:"modal-close",onClick:closeModal},"×"),
+        h("h2",null,"🎛️ Change Coordinator PIN"),
+        h("input",{id:"ncp",className:"pin-input",type:"password",inputMode:"numeric",maxLength:8,placeholder:"New PIN…",style:{width:"100%",marginBottom:8}}),
+        h("input",{id:"ncp2",className:"pin-input",type:"password",inputMode:"numeric",maxLength:8,placeholder:"Confirm PIN…",style:{width:"100%"}}),
+        h("div",{className:"pin-error"},pinError),
+        h("button",{className:"btn-primary",style:{width:"100%",marginTop:10},onClick:()=>{const v=document.getElementById("ncp").value;const v2=document.getElementById("ncp2").value;if(v!==v2){setPinError("PINs don't match");return;}handleChangePin(v,"coord");}},  "Save New PIN")
+      )
+    ),
+
+    modal==="changeAdminPin"&&h("div",{className:"overlay",onClick:e=>e.target===e.currentTarget&&closeModal()},
+      h("div",{className:"modal"},
+        h("button",{className:"modal-close",onClick:closeModal},"×"),
+        h("h2",null,"🔐 Change Admin PIN"),
+        h("input",{id:"nap",className:"pin-input",type:"password",inputMode:"numeric",maxLength:8,placeholder:"New PIN…",style:{width:"100%",marginBottom:8}}),
+        h("input",{id:"nap2",className:"pin-input",type:"password",inputMode:"numeric",maxLength:8,placeholder:"Confirm PIN…",style:{width:"100%"}}),
+        h("div",{className:"pin-error"},pinError),
+        h("button",{className:"btn-primary",style:{width:"100%",marginTop:10},onClick:()=>{const v=document.getElementById("nap").value;const v2=document.getElementById("nap2").value;if(v!==v2){setPinError("PINs don't match");return;}handleChangePin(v,"admin");}},  "Save New PIN")
+      )
+    ),
+
+    shared.drillActive&&h("div",{className:"drill-banner"},"🔥 FIRE DRILL IN PROGRESS — REPORT YOUR STATUS NOW",h("span",{className:"drill-timer"},elapsed),"🔥"),
 
     // HEADER
     h("header",{className:"hdr"},
       h("div",{className:"logo"},h("span",{className:"flame"},"🔥"),h("h1",null,"Fire",h("span",null,"Check"))),
       h("div",{className:"hdr-right"},
         syncing&&h("div",{style:{fontFamily:"'Space Mono',monospace",fontSize:10,color:"#22c55e",display:"flex",alignItems:"center",gap:6}},h("div",{className:"live-dot"}),"LIVE"),
-        sendingCount>0
-          ?h("div",{className:"badge",style:{borderColor:"rgba(245,158,11,.4)",color:"#f59e0b",background:"rgba(245,158,11,.08)"}},h("div",{className:"live-dot",style:{background:"#f59e0b"}}),"SENDING "+sendingCount+"…")
-          :h("button",{className:"badge "+(twilioReady?"green":"dim"),onClick:()=>setShowConfig(v=>!v)},twilioReady?[h("div",{key:"d",className:"live-dot"}),"SMS READY"]:"📱 SETUP SMS"),
-        isCoord
-          ?h("button",{className:"badge coord",onClick:()=>{setIsCoord(false);showToast("🔒 Locked");}},"🔒 Lock")
-          :pinIsSet
-            ?h("button",{className:"badge dim",onClick:()=>{setShowUnlock(true);setPinError("");}},"🔓 Coordinator")
-            :h("button",{className:"badge dim",onClick:()=>{setShowSetPin(true);setPinError("");}},"🔐 Setup Coordinator")
+        sendingCount>0&&h("div",{className:"badge amber"},"📱 "+sendingCount+"…"),
+        h("button",{className:"badge "+(twilioReady?"green":"dim"),onClick:()=>setShowConfig(v=>!v)},twilioReady?[h("div",{key:"d",className:"live-dot"}),"SMS READY"]:"📱 SMS SETUP"),
+        h("div",{className:"badge "+(isAdmin?"admin":"coord"),style:{cursor:"default"}},isAdmin?"🔐 ADMIN":"🎛️ COORDINATOR"),
+        h("button",{className:"badge dim",style:{borderColor:"#333"},onClick:()=>{setAccessLevel(ACCESS.NONE);showToast("🔒 App locked");}},"🔒 Lock App")
       )
     ),
 
     h("main",{className:"main"},
 
-      // TWILIO CONFIG
       showConfig&&h("div",{className:"config-panel"},
-        h("h3",null,"📱 Twilio SMS Setup"),
-        h("p",null,"Only you need to set this up. Teammates never see this."),
+        h("h3",null,"📱 Twilio SMS Setup"),h("p",null,"Only coordinator needs this. Teammates never see it."),
         h("div",{className:"cfg-row"},
-          h("div",{className:"cfg-field"},h("div",{className:"cfg-lbl"},"ACCOUNT SID"),h("input",{className:"inp",placeholder:"ACxxxxxxxx",value:twSid,onChange:e=>setTwSid(e.target.value),style:{width:"100%"}})),
-          h("div",{className:"cfg-field"},h("div",{className:"cfg-lbl"},"AUTH TOKEN"),h("input",{className:"inp",type:"password",placeholder:"••••••••",value:twToken,onChange:e=>setTwToken(e.target.value),style:{width:"100%"}}))
+          h("div",{className:"cfg-field"},h("div",{className:"cfg-lbl"},"ACCOUNT SID"),h("input",{className:"inp",value:twSid,onChange:e=>setTwSid(e.target.value),style:{width:"100%"}})),
+          h("div",{className:"cfg-field"},h("div",{className:"cfg-lbl"},"AUTH TOKEN"),h("input",{className:"inp",type:"password",value:twToken,onChange:e=>setTwToken(e.target.value),style:{width:"100%"}}))
         ),
         h("div",{className:"cfg-row",style:{gridTemplateColumns:"1fr auto"}},
-          h("div",{className:"cfg-field"},h("div",{className:"cfg-lbl"},"TWILIO PHONE NUMBER"),h("input",{className:"inp",placeholder:"+18553583196",value:twFrom,onChange:e=>setTwFrom(e.target.value),style:{width:"100%"}})),
+          h("div",{className:"cfg-field"},h("div",{className:"cfg-lbl"},"TWILIO NUMBER"),h("input",{className:"inp",value:twFrom,onChange:e=>setTwFrom(e.target.value),style:{width:"100%"}})),
           h("div",{style:{display:"flex",alignItems:"flex-end"}},h("button",{className:"btn-primary",onClick:()=>{LS.set("fc:twilio",{accountSid:twSid,authToken:twToken,fromNumber:twFrom});setShowConfig(false);showToast("✅ Twilio saved");}},"Save"))
         )
       ),
 
-      // MY STATUS CARD
+      // MY STATUS
       h("div",{className:"card"},
         h("div",{className:"lbl"},"// my status"),
         me&&h("div",{className:"user-row"},
           h(Avatar,{name:me.name,color:STATUS_META[me.status]?.color||"#555",bg:STATUS_META[me.status]?.bg||"#1a1a1a",size:44}),
-          h("div",{className:"user-info"},
-            h("h2",null,me.name,isCoord&&h("span",{style:{fontSize:11,color:"#fbbf24",marginLeft:8,fontFamily:"'Space Mono',monospace"}},"★ COORD")),
-            h("p",null,me.role)
-          ),
+          h("div",{className:"user-info"},h("h2",null,me.name,isAdmin&&h("span",{style:{fontSize:10,color:"#a78bfa",marginLeft:6,fontFamily:"'Space Mono',monospace"}},"★ ADMIN"),isCoord&&!isAdmin&&h("span",{style:{fontSize:10,color:"#fbbf24",marginLeft:6,fontFamily:"'Space Mono',monospace"}},"★ COORD")),h("p",null,me.role)),
           h("button",{onClick:()=>{setMe(null);LS.set("fc:me",null);setNameInput("");},style:{marginLeft:"auto",background:"transparent",border:"1px solid #222",borderRadius:8,padding:"4px 10px",color:"#444",fontFamily:"'Space Mono',monospace",fontSize:10,cursor:"pointer"}},"edit")
         ),
         !me
           ?h("div",null,
-            h("div",{className:"input-row"},
-              h("input",{className:"inp",placeholder:"Your name…",value:nameInput,onChange:e=>setNameInput(e.target.value),onKeyDown:e=>e.key==="Enter"&&join(),maxLength:30}),
-              h("input",{className:"inp",placeholder:"Role / team…",value:roleInput,onChange:e=>setRoleInput(e.target.value),onKeyDown:e=>e.key==="Enter"&&join(),maxLength:40,style:{maxWidth:180}})
-            ),
-            h("div",{className:"input-row"},
-              h("input",{className:"inp",placeholder:"📱 Mobile number (optional if in phone book)…",value:phoneInput,onChange:e=>setPhoneInput(e.target.value),onKeyDown:e=>e.key==="Enter"&&join(),maxLength:15,type:"tel"}),
-              h("button",{className:"btn-primary",onClick:join},"Join Team")
-            ),
-            urlName&&h("div",{style:{fontSize:11,color:"#22c55e",fontFamily:"'Space Mono',monospace",marginTop:8}},"✅ Name pre-filled from SMS link")
+            h("div",{className:"input-row"},h("input",{className:"inp",placeholder:"Your name…",value:nameInput,onChange:e=>setNameInput(e.target.value),onKeyDown:e=>e.key==="Enter"&&join(),maxLength:30}),h("input",{className:"inp",placeholder:"Role…",value:roleInput,onChange:e=>setRoleInput(e.target.value),maxLength:40,style:{maxWidth:160}})),
+            h("div",{className:"input-row"},h("input",{className:"inp",placeholder:"📱 Mobile (optional if in phone book)…",value:phoneInput,onChange:e=>setPhoneInput(e.target.value),maxLength:15,type:"tel"}),h("button",{className:"btn-primary",onClick:join},"Join"))
           )
           :h("div",null,
             h("div",{className:"status-grid"},
-              [{key:"safe",label:"I'm Safe & Outside",sub:"Evacuated, at muster point"},
-               {key:"away",label:"Evacuating Now",sub:"Still making my way out"},
-               {key:"out",label:"Not at Work Today",sub:"WFH, PTO, or off-site"},
-               {key:"nothere",label:"Can't Respond",sub:"Unsure / phone issue"}
-              ].map(({key,label,sub})=>{
-                const m=STATUS_META[key],active=me.status===key;
-                return h("button",{key,className:"s-btn"+(active?" active":""),style:active?{borderColor:m.color,background:m.bg}:{},onClick:()=>setStatus(key)},
-                  h("span",{className:"s-icon"},m.icon),h("div",null,label,h("span",{className:"s-sub"},sub))
-                );
-              })
+              [{key:"safe",label:"I'm Safe & Outside",sub:"Evacuated, at muster point"},{key:"away",label:"Evacuating Now",sub:"Still making my way out"},
+               {key:"out",label:"Not at Work Today",sub:"WFH, PTO, or off-site"},{key:"nothere",label:"Can't Respond",sub:"Unsure / phone issue"}
+              ].map(({key,label,sub})=>{const m=STATUS_META[key],active=me.status===key;return h("button",{key,className:"s-btn"+(active?" active":""),style:active?{borderColor:m.color,background:m.bg}:{},onClick:()=>setStatus(key)},h("span",{className:"s-icon"},m.icon),h("div",null,label,h("span",{className:"s-sub"},sub)));})
             ),
-            h("div",{className:"note-row"},
-              h("input",{className:"inp",placeholder:'Optional note… e.g. "At parking lot entrance"',value:noteInput,onChange:e=>setNoteInput(e.target.value),onKeyDown:e=>e.key==="Enter"&&sendNote(),maxLength:80}),
-              h("button",{className:"btn-primary",onClick:sendNote},"Send")
-            )
+            h("div",{className:"note-row"},h("input",{className:"inp",placeholder:'Note… e.g. "At parking lot entrance"',value:noteInput,onChange:e=>setNoteInput(e.target.value),onKeyDown:e=>e.key==="Enter"&&sendNote(),maxLength:80}),h("button",{className:"btn-primary",onClick:sendNote},"Send"))
           )
       ),
 
-      // COORDINATOR PANEL
+      // DRILL CONTROL — coordinator only
       isCoord&&h("div",{className:"coord-panel"},
         h("div",{className:"coord-panel-hdr"},
           h("h3",null,"🎛️ Drill Control ",h("span",{className:"coord-tag"},"COORDINATOR")),
           h("div",{className:"ctrl-btns"},
             h("button",{className:"cbtn start",onClick:startDrill},"🔔 Start Drill"),
-            h("button",{className:"cbtn end",onClick:()=>setShowEndConfirm(true)},"✅ End Drill"),
-            h("button",{className:"cbtn lock",onClick:()=>{setIsCoord(false);showToast("🔒 Locked");}},"🔒 Lock")
+            h("button",{className:"cbtn end",onClick:()=>setModal("endConfirm")},"✅ End Drill")
           )
         ),
-        h("div",{className:"coord-hint"},
-          "Start → personalized SMS sent to all in phone book (",
-          h("strong",{style:{color:"#888"}},(shared.phonebook||[]).filter(p=>p.phone).length," contacts"),
-          ") | End → confirmation screen protects against accidental taps"
-        )
-      ),
-
-      !isCoord&&h("div",{className:"locked-panel"},
-        h("div",{className:"locked-info"},
-          h("h3",null,"🔒 Drill Control"),
-          h("p",null,pinIsSet?"Coordinator login required":"No coordinator set up yet")
-        ),
-        pinIsSet
-          ?h("button",{className:"cbtn",onClick:()=>{setShowUnlock(true);setPinError("");}},"🔓 Coordinator Login")
-          :h("button",{className:"cbtn start",onClick:()=>{setShowSetPin(true);setPinError("");}},"🔐 Become Coordinator")
+        h("div",{className:"coord-hint"},"Start → personalized SMS to "+(shared.phonebook||[]).filter(p=>p.phone).length+" contacts | End → confirmation screen prevents accidents")
       ),
 
       // TABS
       h("div",{className:"tabs"},
-        [{id:"live",label:"🔴 Live Board"},
-         {id:"phonebook",label:"📋 Phone Book"},
-         {id:"history",label:"📁 Drill History"},
-        ].map(({id,label})=>
-          h("button",{key:id,className:"tab-btn"+(activeTab===id?" active":""),onClick:()=>setActiveTab(id)},label)
-        )
+        [{id:"live",label:"🔴 Live"},{id:"phonebook",label:"📋 Phone Book"},{id:"history",label:"📁 History"},{id:"settings",label:"⚙️ Settings"}]
+        .map(({id,label})=>h("button",{key:id,className:"tab-btn"+(activeTab===id?" active":""),onClick:()=>setActiveTab(id)},label))
       ),
 
-      // ── LIVE BOARD ──────────────────────────────────────────────────────
+      // ── LIVE ──────────────────────────────────────────────────────────
       activeTab==="live"&&h("div",null,
         h("div",{className:"stats"},
-          [{key:"safe",color:"#22c55e",label:"SAFE"},
-           {key:"away",color:"#f59e0b",label:"EVACUATING"},
-           {key:"out",color:"#3b82f6",label:"NOT IN"},
-           {key:"waiting",color:"#4b5563",label:"UNKNOWN",extra:"nothere"}
-          ].map(({key,color,label,extra})=>
-            h("div",{key,className:"stat"},
-              h("div",{className:"stat-n",style:{color}},(stats[key]||0)+(extra?stats[extra]||0:0)),
-              h("div",{className:"stat-l"},label)
-            )
-          )
+          [{key:"safe",color:"#22c55e",label:"SAFE"},{key:"away",color:"#f59e0b",label:"EVACUATING"},
+           {key:"out",color:"#3b82f6",label:"NOT IN"},{key:"waiting",color:"#4b5563",label:"UNKNOWN",extra:"nothere"}
+          ].map(({key,color,label,extra})=>h("div",{key,className:"stat"},h("div",{className:"stat-n",style:{color}},(stats[key]||0)+(extra?stats[extra]||0:0)),h("div",{className:"stat-l"},label)))
         ),
-        h("div",{className:"team-hdr"},
-          h("h3",null,"Team Status"),
-          h("span",{className:"cnt-badge"},(shared.members||[]).length+" member"+((shared.members||[]).length!==1?"s":"")),
-          h("span",{style:{marginLeft:"auto",fontFamily:"'Space Mono',monospace",fontSize:10,color:"#252525"}},"syncs every 4s")
-        ),
+        h("div",{className:"team-hdr"},h("h3",null,"Team Status"),h("span",{className:"cnt-badge"},(shared.members||[]).length+" member"+((shared.members||[]).length!==1?"s":"")),h("span",{style:{marginLeft:"auto",fontFamily:"'Space Mono',monospace",fontSize:10,color:"#252525"}},"syncs every 4s")),
         (shared.members||[]).length===0
-          ?h("div",{className:"empty"},
-            h("h3",null,"No responses yet"),
-            h("p",null,"Start a drill to notify your team. They'll tap the SMS link to report their status.")
-          )
+          ?h("div",{className:"empty"},h("h3",null,"No responses yet"),h("p",null,"Start a drill — teammates get a personalized SMS link."))
           :sorted.map(member=>{
             const meta=STATUS_META[member.status]||STATUS_META.waiting;
             const recentPing=(shared.pingedAt||{})[member.name]&&(Date.now()-(shared.pingedAt||{})[member.name])<12000;
-            const needsPing=isCoord&&(member.status==="waiting"||member.status==="nothere");
             return h("div",{key:member.name,className:"member",style:recentPing?{borderColor:"rgba(245,158,11,.4)",background:"rgba(245,158,11,.04)"}:{}},
               h(Avatar,{name:member.name,color:meta.color,bg:meta.bg,size:38}),
-              h("div",{className:"m-info"},
-                h("h4",null,member.name,me&&member.name===me.name&&h("span",{className:"you-tag"},"(you)")),
-                h("p",null,member.role),
-                member.note&&h("div",{className:"m-note"},'"',member.note,'"'),
-                h("div",{className:"m-time"},timeAgo(member.ts))
-              ),
+              h("div",{className:"m-info"},h("h4",null,member.name,me&&member.name===me.name&&h("span",{className:"you-tag"},"(you)")),h("p",null,member.role),member.note&&h("div",{className:"m-note"},'"',member.note,'"'),h("div",{className:"m-time"},timeAgo(member.ts))),
               h("div",{className:"pill",style:{background:meta.bg,color:meta.color,border:"1px solid "+meta.border}},meta.icon," ",meta.label),
-              needsPing&&h("button",{className:"ping-btn"+(recentPing?" pinged":""),onClick:()=>pingMember(member)},recentPing?"📣 SENT":"📣 PING")
+              isCoord&&(member.status==="waiting"||member.status==="nothere")&&h("button",{className:"ping-btn"+(recentPing?" pinged":""),onClick:()=>pingMember(member)},recentPing?"📣 SENT":"📣 PING")
             );
           }),
-        smsLog.length>0&&h("div",{className:"sms-log",style:{marginTop:16}},
-          h("h4",null,"📋 SMS Log ",h("span",{style:{fontWeight:400,fontSize:11,color:"#444"}},"— "+smsLog.length+" messages")),
-          smsLog.slice(0,5).map((l,i)=>h("div",{key:i,className:"log-entry"},
-            h("span",{className:"log-status "+l.status},l.status==="sent"?"✓ SENT":"✗ FAIL"),
-            h("span",{className:"log-name"},l.name),
-            h("span",{className:"log-num"},l.to),
-            h("span",{className:"log-time"},timeAgo(l.ts))
-          ))
+        smsLog.length>0&&h("div",{className:"sms-log",style:{marginTop:14}},
+          h("h4",null,"📋 SMS Log ",h("span",{style:{fontWeight:400,fontSize:11,color:"#444"}},smsLog.length+" messages")),
+          smsLog.slice(0,5).map((l,i)=>h("div",{key:i,className:"log-entry"},h("span",{className:"log-status "+l.status},l.status==="sent"?"✓ SENT":"✗ FAIL"),h("span",{className:"log-name"},l.name),h("span",{className:"log-num"},l.to),h("span",{className:"log-time"},timeAgo(l.ts))))
         )
       ),
 
-      // ── PHONE BOOK ──────────────────────────────────────────────────────
+      // ── PHONE BOOK ────────────────────────────────────────────────────
       activeTab==="phonebook"&&h("div",null,
-        h("div",{className:"card"},
+        isAdmin&&h("div",{className:"card"},
           h("div",{className:"lbl"},"// add teammate"),
-          h("p",{style:{fontSize:12,color:"#555",marginBottom:16,lineHeight:1.6}},"Add your teammates here once. When a drill starts, they'll receive a personalized SMS with a link — no app setup needed from them."),
-          h("div",{className:"input-row"},
-            h("input",{className:"inp",placeholder:"Full name…",value:pbName,onChange:e=>setPbName(e.target.value),maxLength:30}),
-            h("input",{className:"inp",placeholder:"Role…",value:pbRole,onChange:e=>setPbRole(e.target.value),maxLength:40,style:{maxWidth:160}})
-          ),
-          h("div",{className:"input-row"},
-            h("input",{className:"inp",placeholder:"📱 Phone number…",value:pbPhone,onChange:e=>setPbPhone(e.target.value),maxLength:15,type:"tel",onKeyDown:e=>e.key==="Enter"&&addToPb()}),
-            h("button",{className:"btn-primary",onClick:addToPb},"Add")
-          )
+          h("p",{style:{fontSize:12,color:"#555",marginBottom:14,lineHeight:1.6}},"Teammates get a personalized SMS when a drill starts. They tap the link and report — no app account needed."),
+          h("div",{className:"input-row"},h("input",{className:"inp",placeholder:"Full name…",value:pbName,onChange:e=>setPbName(e.target.value),maxLength:30}),h("input",{className:"inp",placeholder:"Role…",value:pbRole,onChange:e=>setPbRole(e.target.value),maxLength:40,style:{maxWidth:160}})),
+          h("div",{className:"input-row"},h("input",{className:"inp",placeholder:"📱 Phone number…",value:pbPhone,onChange:e=>setPbPhone(e.target.value),maxLength:15,type:"tel",onKeyDown:e=>e.key==="Enter"&&addToPb()}),h("button",{className:"btn-primary",onClick:addToPb},"Add"))
         ),
+        !isAdmin&&h("div",{style:{background:"rgba(167,139,250,.06)",border:"1px solid rgba(167,139,250,.2)",borderRadius:12,padding:"14px 18px",marginBottom:14,fontSize:13,color:"#a78bfa"}},"🔐 Admin access required to manage the phone book."),
         (shared.phonebook||[]).length===0
-          ?h("div",{className:"empty"},h("h3",null,"Phone book is empty"),h("p",null,"Add your teammates above. Their numbers are saved permanently."))
-          :(shared.phonebook||[]).map(p=>
-            h("div",{key:p.name,className:"member"},
-              h(Avatar,{name:p.name,color:"#6b7280",bg:"rgba(107,114,128,0.12)",size:38}),
-              h("div",{className:"m-info"},
-                h("h4",null,p.name),
-                h("p",null,p.role),
-                h("div",{className:"m-phone"},"📱 ",fmtPhone(p.phone))
-              ),
-              isCoord&&h("button",{onClick:()=>removeFromPb(p.name),style:{border:"1px solid #333",background:"transparent",color:"#555",borderRadius:8,padding:"5px 10px",fontFamily:"'Space Mono',monospace",fontSize:10,cursor:"pointer",flexShrink:0}},"Remove")
+          ?h("div",{className:"empty"},h("h3",null,"Phone book is empty"),h("p",null,isAdmin?"Add teammates above.":"Log in as admin to manage teammates."))
+          :(shared.phonebook||[]).map(p=>h("div",{key:p.name,className:"member"},
+            h(Avatar,{name:p.name,color:"#6b7280",bg:"rgba(107,114,128,0.12)",size:38}),
+            h("div",{className:"m-info"},h("h4",null,p.name),h("p",null,p.role),h("div",{className:"m-phone"},"📱 ",fmtPhone(p.phone))),
+            isAdmin&&h("div",{style:{display:"flex",gap:6,flexShrink:0}},
+              h("button",{onClick:()=>{setEditTarget({...p,_origName:p.name});setModal("editUser");},style:{border:"1px solid #333",background:"transparent",color:"#888",borderRadius:8,padding:"5px 10px",fontFamily:"'Space Mono',monospace",fontSize:10,cursor:"pointer"}},"✏️"),
+              h("button",{onClick:()=>removeFromPb(p.name),style:{border:"1px solid #333",background:"transparent",color:"#ef4444",borderRadius:8,padding:"5px 10px",fontFamily:"'Space Mono',monospace",fontSize:10,cursor:"pointer"}},"🗑️")
             )
-          )
+          ))
       ),
 
-      // ── DRILL HISTORY ───────────────────────────────────────────────────
+      // ── HISTORY ───────────────────────────────────────────────────────
       activeTab==="history"&&h("div",null,
         (shared.history||[]).length===0
-          ?h("div",{className:"empty"},h("h3",null,"No drill history yet"),h("p",null,"Completed drills will be saved here automatically when you end a drill."))
-          :(shared.history||[]).map((drill,di)=>
-            h("div",{key:drill.id,className:"card",style:{marginBottom:14}},
-              h("div",{style:{display:"flex",alignItems:"center",justifyContent:"space-between",marginBottom:12,flexWrap:"wrap",gap:8}},
-                h("div",null,
-                  h("div",{style:{fontWeight:800,fontSize:15}},"Drill #"+(( shared.history||[]).length-di)),
-                  h("div",{style:{fontSize:11,color:"#555",fontFamily:"'Space Mono',monospace",marginTop:3}},fmtDate(drill.startedAt)+" → "+fmtDate(drill.endedAt))
-                ),
-                h("div",{style:{fontFamily:"'Space Mono',monospace",fontSize:11,color:"#444"}},
-                  Math.floor((drill.endedAt-drill.startedAt)/60000)+"m "+Math.floor(((drill.endedAt-drill.startedAt)%60000)/1000)+"s"
-                )
-              ),
-              h("div",{style:{display:"grid",gridTemplateColumns:"repeat(4,1fr)",gap:8,marginBottom:14}},
-                [{label:"✅ Safe",val:drill.summary.safe,color:"#22c55e"},
-                 {label:"🏃 Evac",val:drill.summary.away,color:"#f59e0b"},
-                 {label:"🏠 Out",val:drill.summary.out,color:"#3b82f6"},
-                 {label:"⏳ No resp",val:drill.summary.waiting+drill.summary.nothere,color:"#555"},
-                ].map(({label,val,color})=>
-                  h("div",{key:label,style:{background:"#0d0d0d",borderRadius:8,padding:"10px",textAlign:"center"}},
-                    h("div",{style:{fontSize:20,fontWeight:800,color,fontFamily:"'Space Mono',monospace"}},val),
-                    h("div",{style:{fontSize:10,color:"#444",marginTop:2}},label)
-                  )
-                )
-              ),
-              h("div",{style:{borderTop:"1px solid #1a1a1a",paddingTop:12}},
-                h("div",{style:{fontFamily:"'Space Mono',monospace",fontSize:10,color:"#333",marginBottom:8,letterSpacing:"0.1em"}},"MEMBER RESPONSES"),
-                (drill.members||[]).sort((a,b)=>(SORT_ORDER[a.status]??4)-(SORT_ORDER[b.status]??4)).map(m=>{
-                  const meta=STATUS_META[m.status]||STATUS_META.waiting;
-                  return h("div",{key:m.name,style:{display:"flex",alignItems:"center",gap:10,padding:"6px 0",borderBottom:"1px solid #111"}},
-                    h(Avatar,{name:m.name,color:meta.color,bg:meta.bg,size:30}),
-                    h("div",{style:{flex:1,minWidth:0}},
-                      h("div",{style:{fontSize:13,fontWeight:700}},m.name),
-                      m.note&&h("div",{style:{fontSize:11,color:"#555",fontStyle:"italic"}},'"',m.note,'"')
-                    ),
-                    h("div",{style:{display:"flex",alignItems:"center",gap:5,borderRadius:20,padding:"3px 10px",fontSize:11,fontWeight:700,background:meta.bg,color:meta.color,border:"1px solid "+meta.border,whiteSpace:"nowrap",flexShrink:0}},meta.icon," ",meta.label)
-                  );
-                })
-              )
+          ?h("div",{className:"empty"},h("h3",null,"No drill history yet"),h("p",null,"Completed drills are saved here automatically."))
+          :(shared.history||[]).map((drill,di)=>h("div",{key:drill.id,className:"card",style:{marginBottom:14}},
+            h("div",{style:{display:"flex",alignItems:"center",justifyContent:"space-between",marginBottom:12,flexWrap:"wrap",gap:8}},
+              h("div",null,h("div",{style:{fontWeight:800,fontSize:15}},"Drill #"+((shared.history||[]).length-di)),h("div",{style:{fontSize:11,color:"#555",fontFamily:"'Space Mono',monospace",marginTop:3}},fmtDate(drill.startedAt)+" → "+fmtDate(drill.endedAt))),
+              h("div",{style:{fontFamily:"'Space Mono',monospace",fontSize:11,color:"#444"}},Math.floor((drill.endedAt-drill.startedAt)/60000)+"m "+Math.floor(((drill.endedAt-drill.startedAt)%60000)/1000)+"s")
+            ),
+            h("div",{style:{display:"grid",gridTemplateColumns:"repeat(4,1fr)",gap:8,marginBottom:12}},
+              [{label:"✅ Safe",val:drill.summary.safe,color:"#22c55e"},{label:"🏃 Evac",val:drill.summary.away,color:"#f59e0b"},
+               {label:"🏠 Out",val:drill.summary.out,color:"#3b82f6"},{label:"⏳ No resp",val:drill.summary.waiting+drill.summary.nothere,color:"#555"}
+              ].map(({label,val,color})=>h("div",{key:label,style:{background:"#0d0d0d",borderRadius:8,padding:"10px",textAlign:"center"}},h("div",{style:{fontSize:20,fontWeight:800,color,fontFamily:"'Space Mono',monospace"}},val),h("div",{style:{fontSize:10,color:"#444",marginTop:2}},label)))
+            ),
+            h("div",{style:{borderTop:"1px solid #1a1a1a",paddingTop:10}},
+              h("div",{style:{fontFamily:"'Space Mono',monospace",fontSize:10,color:"#333",marginBottom:8,letterSpacing:"0.1em"}},"RESPONSES"),
+              (drill.members||[]).sort((a,b)=>(SORT_ORDER[a.status]??4)-(SORT_ORDER[b.status]??4)).map(m=>{
+                const meta=STATUS_META[m.status]||STATUS_META.waiting;
+                return h("div",{key:m.name,style:{display:"flex",alignItems:"center",gap:10,padding:"6px 0",borderBottom:"1px solid #111"}},
+                  h(Avatar,{name:m.name,color:meta.color,bg:meta.bg,size:28}),
+                  h("div",{style:{flex:1,minWidth:0}},h("div",{style:{fontSize:13,fontWeight:700}},m.name),m.note&&h("div",{style:{fontSize:11,color:"#555",fontStyle:"italic"}},'"',m.note,'"')),
+                  h("div",{style:{display:"flex",alignItems:"center",gap:4,borderRadius:20,padding:"3px 10px",fontSize:11,fontWeight:700,background:meta.bg,color:meta.color,border:"1px solid "+meta.border,whiteSpace:"nowrap",flexShrink:0}},meta.icon," ",meta.label)
+                );
+              })
             )
+          ))
+      ),
+
+      // ── SETTINGS ─────────────────────────────────────────────────────
+      activeTab==="settings"&&h("div",null,
+        h("div",{className:"card"},
+          h("div",{className:"lbl"},"// security"),
+          h("p",{style:{fontSize:12,color:"#555",marginBottom:16,lineHeight:1.7}},"Change PINs here. Make sure to write them down — there is no recovery option."),
+          h("div",{style:{display:"flex",gap:10,flexWrap:"wrap"}},
+            isCoord&&h("button",{className:"cbtn",style:{borderColor:"#fbbf24",color:"#fbbf24"},onClick:()=>setModal("changeCoordPin")},"🎛️ Change Coordinator PIN"),
+            isAdmin&&h("button",{className:"cbtn",style:{borderColor:"#a78bfa",color:"#a78bfa"},onClick:()=>setModal("changeAdminPin")},"🔐 Change Admin PIN")
           )
+        ),
+        h("div",{className:"card"},
+          h("div",{className:"lbl"},"// access levels"),
+          h("p",{style:{fontSize:12,color:"#555",lineHeight:1.7}},"🔐 Admin PIN — manages phone book, settings, changes PINs"),
+          h("p",{style:{fontSize:12,color:"#555",lineHeight:1.7,marginTop:6}},"🎛️ Coordinator PIN — starts and ends drills, pings teammates"),
+          h("p",{style:{fontSize:12,color:"#555",lineHeight:1.7,marginTop:6}},"🔒 Everyone else — sees a lock screen when opening the app"),
+          h("p",{style:{fontSize:12,color:"#22c55e",lineHeight:1.7,marginTop:6}},"✅ Teammates arriving via SMS link bypass the lock and see only their status panel")
+        )
       )
     ),
-
     h("div",{className:"toast"+(toast?" show":"")},toast)
   );
 }
 
-// ── STYLES ────────────────────────────────────────────────────────────────────
 const style=document.createElement("style");
 style.textContent=`
 .root{min-height:100vh;background:#090909;color:#f0ede8;font-family:'Syne',sans-serif;padding-bottom:80px}
@@ -726,37 +612,59 @@ style.textContent=`
 .drill-banner{background:linear-gradient(90deg,#7f1d1d,#991b1b,#7f1d1d);border-bottom:2px solid #ff4d2e;padding:10px 20px;display:flex;align-items:center;justify-content:center;gap:12px;font-family:'Space Mono',monospace;font-size:12px;font-weight:700;letter-spacing:.12em;color:#fca5a5;animation:bPulse 1.5s ease-in-out infinite alternate;flex-wrap:wrap;text-align:center}
 @keyframes bPulse{from{background:linear-gradient(90deg,#7f1d1d,#991b1b,#7f1d1d)}to{background:linear-gradient(90deg,#991b1b,#b91c1c,#991b1b)}}
 .drill-timer{font-size:16px;color:#fff;background:rgba(0,0,0,.3);padding:2px 10px;border-radius:6px}
-.hdr{max-width:880px;margin:0 auto;padding:26px 20px 0;display:flex;justify-content:space-between;align-items:center;flex-wrap:wrap;gap:10px}
+/* LOCK SCREEN */
+.lock-screen{min-height:100vh;background:#090909;display:flex;align-items:center;justify-content:center;padding:20px}
+.lock-box{width:100%;max-width:400px;background:#131313;border:1px solid #1e1e1e;border-radius:24px;padding:36px;text-align:center}
+.lock-logo{display:flex;align-items:center;justify-content:center;gap:10px;margin-bottom:20px}
+.lock-logo h1{font-size:24px;font-weight:800;color:#f0ede8}.lock-logo h1 span{color:#ff4d2e}
+.lock-icon{font-size:48px;margin-bottom:12px}
+.lock-title{font-size:20px;font-weight:800;color:#f0ede8;margin-bottom:8px}
+.lock-sub{font-size:13px;color:#555;line-height:1.6;margin-bottom:24px}
+.lock-pin-label{font-family:'Space Mono',monospace;font-size:10px;color:#444;letter-spacing:.12em;margin-bottom:8px;text-align:left}
+.lock-pin-input{width:100%;background:#1a1a1a;border:1.5px solid #252525;border-radius:12px;padding:14px 16px;color:#f0ede8;font-family:'Space Mono',monospace;font-size:22px;letter-spacing:.4em;outline:none;text-align:center;transition:border-color .15s;margin-bottom:4px}.lock-pin-input:focus{border-color:#444}
+.lock-error{color:#ef4444;font-size:12px;font-family:'Space Mono',monospace;min-height:20px;margin:4px 0 12px;text-align:left}
+.lock-btn-primary{width:100%;background:#ff4d2e;border:none;border-radius:12px;padding:13px;color:#fff;font-family:'Syne',sans-serif;font-size:14px;font-weight:800;cursor:pointer;transition:opacity .15s;margin-bottom:8px}.lock-btn-primary:hover{opacity:.85}
+.lock-actions{display:flex;flex-direction:column;gap:10px}
+.lock-btn{border:1.5px solid #252525;background:#1a1a1a;border-radius:12px;padding:14px 18px;cursor:pointer;transition:all .18s;color:#f0ede8;font-family:'Syne',sans-serif;font-size:14px;font-weight:700;text-align:left;display:flex;flex-direction:column;gap:4px}
+.lock-btn span{font-size:11px;font-weight:400;color:#555}
+.lock-btn.admin{border-color:rgba(167,139,250,.3)}.lock-btn.admin:hover{border-color:#a78bfa;background:rgba(167,139,250,.08)}
+.lock-btn.coord{border-color:rgba(251,191,36,.3)}.lock-btn.coord:hover{border-color:#fbbf24;background:rgba(251,191,36,.08)}
+.lock-back{background:none;border:none;color:#555;font-family:'Syne',sans-serif;font-size:13px;cursor:pointer;margin-top:4px}.lock-back:hover{color:#888}
+.lock-hint{font-size:11px;color:#333;font-family:'Space Mono',monospace;margin-top:16px}
+/* MAIN */
+.hdr{max-width:900px;margin:0 auto;padding:22px 20px 0;display:flex;justify-content:space-between;align-items:center;flex-wrap:wrap;gap:10px}
 .logo{display:flex;align-items:center;gap:10px}
 .logo h1{font-size:22px;font-weight:800}.logo h1 span{color:#ff4d2e}
 .flame{font-size:26px;animation:flicker 1.8s ease-in-out infinite alternate;display:inline-block}
 @keyframes flicker{0%{transform:scaleY(1) rotate(-2deg)}50%{transform:scaleY(1.1) rotate(1deg)}100%{transform:scaleY(.95) rotate(2deg)}}
-.hdr-right{display:flex;align-items:center;gap:8px;flex-wrap:wrap}
-.badge{display:flex;align-items:center;gap:6px;padding:6px 12px;border-radius:20px;font-family:'Space Mono',monospace;font-size:10px;font-weight:700;letter-spacing:.06em;cursor:pointer;border:1px solid;transition:all .15s;white-space:nowrap;background:transparent}
+.hdr-right{display:flex;align-items:center;gap:6px;flex-wrap:wrap}
+.badge{display:flex;align-items:center;gap:5px;padding:5px 11px;border-radius:20px;font-family:'Space Mono',monospace;font-size:10px;font-weight:700;letter-spacing:.05em;cursor:pointer;border:1px solid;transition:all .15s;white-space:nowrap;background:transparent}
 .badge.green{border-color:rgba(34,197,94,.4);color:#22c55e;background:rgba(34,197,94,.08)}
-.badge.dim{border-color:#333;color:#555}.badge.dim:hover{border-color:#555;color:#888}
+.badge.dim{border-color:#2a2a2a;color:#555}.badge.dim:hover{border-color:#555;color:#888}
 .badge.coord{border-color:rgba(251,191,36,.4);color:#fbbf24;background:rgba(251,191,36,.08)}
+.badge.admin{border-color:rgba(167,139,250,.4);color:#a78bfa;background:rgba(167,139,250,.08)}
+.badge.amber{border-color:rgba(245,158,11,.4);color:#f59e0b;background:rgba(245,158,11,.08)}
 .live-dot{width:6px;height:6px;background:#22c55e;border-radius:50%;animation:pulse 1.2s infinite;flex-shrink:0}
 @keyframes pulse{0%,100%{opacity:1;transform:scale(1)}50%{opacity:.4;transform:scale(.7)}}
 .overlay{position:fixed;inset:0;background:rgba(0,0,0,.8);z-index:1000;display:flex;align-items:center;justify-content:center;padding:20px}
-.modal{background:#141414;border:1px solid #2a2a2a;border-radius:20px;padding:28px;width:100%;max-width:420px;position:relative;max-height:90vh;overflow-y:auto}
-.modal h2{font-size:18px;font-weight:800;margin-bottom:6px}
-.modal p{font-size:13px;color:#555;margin-bottom:16px;line-height:1.6}
-.modal-close{position:absolute;top:16px;right:18px;background:none;border:none;color:#444;font-size:20px;cursor:pointer}.modal-close:hover{color:#888}
-.pin-input{width:100%;background:#1a1a1a;border:1.5px solid #252525;border-radius:10px;padding:12px 16px;color:#f0ede8;font-family:'Space Mono',monospace;font-size:20px;letter-spacing:.3em;outline:none;text-align:center;transition:border-color .15s}.pin-input:focus{border-color:#444}
-.pin-error{color:#ef4444;font-size:12px;font-family:'Space Mono',monospace;margin-top:6px;min-height:18px}
-.modal-hint{font-size:11px;color:#333;margin-top:12px;line-height:1.5}
-.main{max-width:880px;margin:0 auto;padding:22px 20px}
-.config-panel{background:#131313;border:1px solid rgba(255,77,46,.2);border-radius:16px;padding:22px;margin-bottom:18px}
+.modal{background:#141414;border:1px solid #2a2a2a;border-radius:20px;padding:26px;width:100%;max-width:400px;position:relative;max-height:90vh;overflow-y:auto}
+.modal h2{font-size:17px;font-weight:800;margin-bottom:6px}
+.modal p{font-size:13px;color:#555;margin-bottom:14px;line-height:1.6}
+.modal-close{position:absolute;top:14px;right:16px;background:none;border:none;color:#444;font-size:20px;cursor:pointer}.modal-close:hover{color:#888}
+.pin-input{width:100%;background:#1a1a1a;border:1.5px solid #252525;border-radius:10px;padding:12px 16px;color:#f0ede8;font-family:'Space Mono',monospace;font-size:20px;letter-spacing:.3em;outline:none;text-align:center}.pin-input:focus{border-color:#444}
+.pin-error{color:#ef4444;font-size:12px;font-family:'Space Mono',monospace;min-height:18px;margin:6px 0}
+.modal-hint{font-size:11px;color:#333;margin-top:10px;line-height:1.5}
+.main{max-width:900px;margin:0 auto;padding:18px 20px}
+.config-panel{background:#131313;border:1px solid rgba(255,77,46,.2);border-radius:16px;padding:20px;margin-bottom:16px}
 .config-panel h3{font-size:14px;font-weight:800;margin-bottom:4px}
-.config-panel p{font-size:12px;color:#555;margin-bottom:16px;line-height:1.6}
+.config-panel p{font-size:12px;color:#555;margin-bottom:14px;line-height:1.6}
 .cfg-row{display:grid;grid-template-columns:1fr 1fr;gap:10px;margin-bottom:10px}
 .cfg-lbl{font-family:'Space Mono',monospace;font-size:10px;color:#444;letter-spacing:.1em;margin-bottom:5px;display:block}
 .cfg-field{display:flex;flex-direction:column}
-.card{background:#131313;border:1px solid #1e1e1e;border-radius:16px;padding:24px;margin-bottom:18px;position:relative;overflow:hidden}
+.card{background:#131313;border:1px solid #1e1e1e;border-radius:16px;padding:20px;margin-bottom:14px;position:relative;overflow:hidden}
 .card::before{content:'';position:absolute;inset:0;background:radial-gradient(ellipse at top left,rgba(255,77,46,.04) 0%,transparent 60%);pointer-events:none}
-.lbl{font-family:'Space Mono',monospace;font-size:10px;letter-spacing:.14em;color:#333;text-transform:uppercase;margin-bottom:16px}
-.user-row{display:flex;align-items:center;gap:14px;margin-bottom:20px}
+.lbl{font-family:'Space Mono',monospace;font-size:10px;letter-spacing:.14em;color:#333;text-transform:uppercase;margin-bottom:14px}
+.user-row{display:flex;align-items:center;gap:14px;margin-bottom:18px}
 .user-info h2{font-size:17px;font-weight:800}.user-info p{font-size:12px;color:#555;margin-top:2px}
 .inp{flex:1;min-width:100px;background:#1a1a1a;border:1.5px solid #222;border-radius:10px;padding:10px 14px;color:#f0ede8;font-family:'Syne',sans-serif;font-size:13px;outline:none;transition:border-color .15s;width:100%}
 .inp::placeholder{color:#3a3a3a}.inp:focus{border-color:#3a3a3a}
@@ -769,7 +677,7 @@ style.textContent=`
 .s-icon{font-size:20px;flex-shrink:0}
 .s-sub{display:block;font-size:11px;font-weight:400;color:#444;margin-top:2px}
 .note-row{display:flex;gap:8px;margin-top:12px}
-.coord-panel{background:#141414;border:1.5px solid rgba(251,191,36,.2);border-radius:16px;padding:20px 22px;margin-bottom:18px}
+.coord-panel{background:#141414;border:1.5px solid rgba(251,191,36,.2);border-radius:16px;padding:18px 20px;margin-bottom:14px}
 .coord-panel-hdr{display:flex;align-items:center;justify-content:space-between;flex-wrap:wrap;gap:10px;margin-bottom:10px}
 .coord-panel-hdr h3{font-size:15px;font-weight:800;display:flex;align-items:center;gap:8px}
 .coord-tag{font-family:'Space Mono',monospace;font-size:10px;color:#fbbf24;background:rgba(251,191,36,.1);border:1px solid rgba(251,191,36,.25);border-radius:20px;padding:3px 10px;letter-spacing:.08em}
@@ -778,41 +686,37 @@ style.textContent=`
 .cbtn{border:1.5px solid #252525;background:#1a1a1a;color:#f0ede8;border-radius:10px;padding:9px 16px;font-family:'Syne',sans-serif;font-size:12px;font-weight:700;cursor:pointer;transition:all .15s}.cbtn:hover{border-color:#555}
 .cbtn.start{background:#ff4d2e;border-color:#ff4d2e;color:#fff}.cbtn.start:hover{opacity:.85}
 .cbtn.end{border-color:#22c55e;color:#22c55e}.cbtn.end:hover{background:rgba(34,197,94,.08)}
-.cbtn.lock{border-color:#fbbf24;color:#fbbf24}.cbtn.lock:hover{background:rgba(251,191,36,.08)}
-.locked-panel{background:#131313;border:1px solid #1e1e1e;border-radius:16px;padding:18px 22px;margin-bottom:18px;display:flex;align-items:center;justify-content:space-between;gap:12px;flex-wrap:wrap}
-.locked-info h3{font-size:14px;font-weight:700;color:#555;display:flex;align-items:center;gap:8px}
-.locked-info p{font-size:12px;color:#333;margin-top:3px}
-.tabs{display:flex;gap:4px;margin-bottom:18px;background:#0d0d0d;border-radius:12px;padding:4px}
-.tab-btn{flex:1;border:none;background:transparent;color:#555;border-radius:9px;padding:9px 12px;font-family:'Syne',sans-serif;font-size:12px;font-weight:700;cursor:pointer;transition:all .15s;white-space:nowrap}
+.tabs{display:flex;gap:4px;margin-bottom:14px;background:#0d0d0d;border-radius:12px;padding:4px}
+.tab-btn{flex:1;border:none;background:transparent;color:#555;border-radius:9px;padding:9px 8px;font-family:'Syne',sans-serif;font-size:12px;font-weight:700;cursor:pointer;transition:all .15s;white-space:nowrap}
 .tab-btn:hover{color:#888}
 .tab-btn.active{background:#1a1a1a;color:#f0ede8;box-shadow:0 1px 4px rgba(0,0,0,.4)}
-.stats{display:grid;grid-template-columns:repeat(4,1fr);gap:10px;margin-bottom:18px}
-.stat{background:#131313;border:1px solid #1e1e1e;border-radius:12px;padding:15px;text-align:center}
-.stat-n{font-size:28px;font-weight:800;font-family:'Space Mono',monospace}
+.stats{display:grid;grid-template-columns:repeat(4,1fr);gap:10px;margin-bottom:14px}
+.stat{background:#131313;border:1px solid #1e1e1e;border-radius:12px;padding:14px;text-align:center}
+.stat-n{font-size:26px;font-weight:800;font-family:'Space Mono',monospace}
 .stat-l{font-size:10px;color:#333;margin-top:3px;font-family:'Space Mono',monospace;letter-spacing:.08em}
-.team-hdr{display:flex;align-items:center;gap:10px;margin-bottom:14px}
+.team-hdr{display:flex;align-items:center;gap:10px;margin-bottom:12px}
 .team-hdr h3{font-size:16px;font-weight:700}
 .cnt-badge{font-family:'Space Mono',monospace;font-size:11px;color:#444;background:#1a1a1a;border:1px solid #222;border-radius:20px;padding:2px 10px}
-.member{background:#131313;border:1px solid #1e1e1e;border-radius:12px;padding:14px 16px;margin-bottom:8px;display:flex;align-items:center;gap:12px;animation:slideIn .25s ease}
+.member{background:#131313;border:1px solid #1e1e1e;border-radius:12px;padding:13px 15px;margin-bottom:8px;display:flex;align-items:center;gap:12px;animation:slideIn .25s ease}
 @keyframes slideIn{from{opacity:0;transform:translateY(5px)}to{opacity:1;transform:translateY(0)}}
 .m-info{flex:1;min-width:0}.m-info h4{font-size:14px;font-weight:700}.m-info p{font-size:12px;color:#555;margin-top:2px}
-.m-note{font-size:11px;color:#555;margin-top:4px;font-style:italic}
+.m-note{font-size:11px;color:#555;margin-top:3px;font-style:italic}
 .m-time{font-family:'Space Mono',monospace;font-size:10px;color:#2a2a2a;margin-top:3px}
 .m-phone{font-family:'Space Mono',monospace;font-size:10px;color:#2e2e2e;margin-top:2px}
-.pill{display:flex;align-items:center;gap:5px;border-radius:20px;padding:4px 11px;font-size:11px;font-weight:700;white-space:nowrap;flex-shrink:0}
+.pill{display:flex;align-items:center;gap:5px;border-radius:20px;padding:4px 10px;font-size:11px;font-weight:700;white-space:nowrap;flex-shrink:0}
 .you-tag{font-size:10px;color:#3a3a3a;margin-left:5px;font-weight:400}
 .ping-btn{border:1px solid #252525;background:transparent;color:#555;border-radius:8px;padding:5px 10px;font-family:'Space Mono',monospace;font-size:10px;cursor:pointer;transition:all .15s;margin-left:4px;flex-shrink:0}.ping-btn:hover{border-color:#ff4d2e;color:#ff4d2e}.ping-btn.pinged{border-color:#f59e0b;color:#f59e0b}
-.empty{background:rgba(107,114,128,.04);border:1px dashed #1e1e1e;border-radius:12px;padding:40px;text-align:center;color:#333}
+.empty{background:rgba(107,114,128,.04);border:1px dashed #1e1e1e;border-radius:12px;padding:36px;text-align:center;color:#333}
 .empty h3{font-size:15px;color:#555;margin-bottom:6px}.empty p{font-size:13px;margin-top:4px}
-.sms-log{background:#0d0d0d;border:1px solid #1a1a1a;border-radius:12px;padding:16px}
-.sms-log h4{font-size:13px;font-weight:700;margin-bottom:12px}
-.log-entry{display:flex;align-items:center;gap:10px;padding:8px 0;border-bottom:1px solid #141414;font-size:11px}.log-entry:last-child{border-bottom:none}
+.sms-log{background:#0d0d0d;border:1px solid #1a1a1a;border-radius:12px;padding:14px}
+.sms-log h4{font-size:13px;font-weight:700;margin-bottom:10px}
+.log-entry{display:flex;align-items:center;gap:10px;padding:7px 0;border-bottom:1px solid #141414;font-size:11px}.log-entry:last-child{border-bottom:none}
 .log-status{font-family:'Space Mono',monospace;font-size:10px;font-weight:700;padding:2px 8px;border-radius:6px}
 .log-status.sent{color:#22c55e;background:rgba(34,197,94,.1)}.log-status.failed{color:#ef4444;background:rgba(239,68,68,.1)}
 .log-name{font-weight:600;flex:1}.log-num{color:#333;font-family:'Space Mono',monospace}.log-time{color:#2a2a2a;font-family:'Space Mono',monospace;font-size:9px}
 .toast{position:fixed;bottom:26px;left:50%;transform:translateX(-50%) translateY(80px);background:#1e1e1e;border:1px solid #2a2a2a;border-radius:12px;padding:11px 20px;font-size:13px;font-weight:600;transition:transform .3s cubic-bezier(.34,1.56,.64,1);z-index:9998;white-space:nowrap;pointer-events:none}
 .toast.show{transform:translateX(-50%) translateY(0)}
-@media(max-width:540px){.stats{grid-template-columns:repeat(2,1fr)}.status-grid{grid-template-columns:1fr}.coord-panel-hdr{flex-direction:column;align-items:flex-start}.cfg-row{grid-template-columns:1fr}.locked-panel{flex-direction:column;align-items:flex-start}.tabs{flex-direction:column}}
+@media(max-width:580px){.stats{grid-template-columns:repeat(2,1fr)}.status-grid{grid-template-columns:1fr}.coord-panel-hdr{flex-direction:column;align-items:flex-start}.cfg-row{grid-template-columns:1fr}.tabs{gap:2px}.tab-btn{font-size:11px;padding:8px 6px}}
 `;
 document.head.appendChild(style);
 ReactDOM.createRoot(document.getElementById("root")).render(React.createElement(App));
