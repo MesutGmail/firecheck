@@ -38,7 +38,13 @@ const ACCESS={NONE:0,TEAMMATE:1,COORDINATOR:2,ADMIN:3};
 
 async function dbRead(){try{const r=await fetch("https://api.jsonbin.io/v3/b/"+BIN_ID+"/latest",{headers:{"X-Master-Key":API_KEY}});if(!r.ok)return null;return(await r.json()).record;}catch(e){return null;}}
 async function dbWrite(data){try{await fetch("https://api.jsonbin.io/v3/b/"+BIN_ID,{method:"PUT",headers:{"Content-Type":"application/json","X-Master-Key":API_KEY},body:JSON.stringify({...data,updatedAt:Date.now()})});}catch(e){}}
-async function sendOneSMS(to,body,creds){return fetch("https://api.twilio.com/2010-04-01/Accounts/"+creds.sid+"/Messages.json",{method:"POST",headers:{"Authorization":"Basic "+btoa(creds.sid+":"+creds.token),"Content-Type":"application/x-www-form-urlencoded"},body:new URLSearchParams({To:to,From:creds.from,Body:body}).toString()}).then(r=>r.json());}
+async function sendOneSMS(to,body,creds){
+  // Use MessagingServiceSid if available, otherwise fall back to From number
+  const params={To:to,Body:body};
+  if(creds.messagingServiceSid) params.MessagingServiceSid=creds.messagingServiceSid;
+  else params.From=creds.from;
+  return fetch("https://api.twilio.com/2010-04-01/Accounts/"+creds.sid+"/Messages.json",{method:"POST",headers:{"Authorization":"Basic "+btoa(creds.sid+":"+creds.token),"Content-Type":"application/x-www-form-urlencoded"},body:new URLSearchParams(params).toString()}).then(r=>r.json());
+}
 
 let audioCtx=null;
 function getCtx(){if(!audioCtx)audioCtx=new(window.AudioContext||window.webkitAudioContext)();if(audioCtx.state==="suspended")audioCtx.resume();return audioCtx;}
@@ -132,6 +138,7 @@ function App(){
   const[twSid,setTwSid]=useState(()=>{const c=LS.get("fc:twilio");return c?.accountSid||"";});
   const[twToken,setTwToken]=useState(()=>{const c=LS.get("fc:twilio");return c?.authToken||"";});
   const[twFrom,setTwFrom]=useState(()=>{const c=LS.get("fc:twilio");return c?.fromNumber||"";});
+  const[twMsgSid,setTwMsgSid]=useState(()=>{const c=LS.get("fc:twilio");return c?.messagingServiceSid||"";});;
   const[smsLog,setSmsLog]=useState([]);
   const[sendingCount,setSendingCount]=useState(0);
   const[alertFlash,setAlertFlash]=useState(false);
@@ -252,7 +259,7 @@ function App(){
   };
 
   // ── SMS ────────────────────────────────────────────────────────────────
-  const creds=useCallback(()=>({sid:twSid,token:twToken,from:fmtPhone(twFrom)}),[twSid,twToken,twFrom]);
+  const creds=useCallback(()=>({sid:twSid,token:twToken,from:fmtPhone(twFrom),messagingServiceSid:twMsgSid}),[twSid,twToken,twFrom,twMsgSid]);
   const blastPersonalized=useCallback(async(targets)=>{
     if(!twSid||!twToken||!twFrom)return 0;
     const withPhone=targets.filter(p=>p.phone);if(!withPhone.length)return 0;
@@ -459,9 +466,12 @@ function App(){
           h("div",{className:"cfg-field"},h("div",{className:"cfg-lbl"},"ACCOUNT SID"),h("input",{className:"inp",value:twSid,onChange:e=>setTwSid(e.target.value),style:{width:"100%"}})),
           h("div",{className:"cfg-field"},h("div",{className:"cfg-lbl"},"AUTH TOKEN"),h("input",{className:"inp",type:"password",value:twToken,onChange:e=>setTwToken(e.target.value),style:{width:"100%"}}))
         ),
-        h("div",{className:"cfg-row",style:{gridTemplateColumns:"1fr auto"}},
-          h("div",{className:"cfg-field"},h("div",{className:"cfg-lbl"},"TWILIO NUMBER"),h("input",{className:"inp",value:twFrom,onChange:e=>setTwFrom(e.target.value),style:{width:"100%"}})),
-          h("div",{style:{display:"flex",alignItems:"flex-end"}},h("button",{className:"btn-primary",onClick:()=>{LS.set("fc:twilio",{accountSid:twSid,authToken:twToken,fromNumber:twFrom});setShowConfig(false);showToast("✅ Twilio saved");}},"Save"))
+        h("div",{className:"cfg-row"},
+          h("div",{className:"cfg-field"},h("div",{className:"cfg-lbl"},"TWILIO PHONE NUMBER"),h("input",{className:"inp",placeholder:"+16176558568",value:twFrom,onChange:e=>setTwFrom(e.target.value),style:{width:"100%"}})),
+          h("div",{className:"cfg-field"},h("div",{className:"cfg-lbl"},"MESSAGING SERVICE SID"),h("input",{className:"inp",placeholder:"MGxxxxxxxxxxxxxxxx",value:twMsgSid,onChange:e=>setTwMsgSid(e.target.value),style:{width:"100%"}}))
+        ),
+        h("div",{style:{display:"flex",justifyContent:"flex-end"}},
+          h("button",{className:"btn-primary",onClick:()=>{LS.set("fc:twilio",{accountSid:twSid,authToken:twToken,fromNumber:twFrom,messagingServiceSid:twMsgSid});setShowConfig(false);showToast("✅ Twilio saved");}},"Save")
         )
       ),
 
