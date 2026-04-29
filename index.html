@@ -591,6 +591,28 @@ function App(){
             isAdmin&&h("button",{className:"cbtn",style:{borderColor:"#a78bfa",color:"#a78bfa"},onClick:()=>setModal("changeAdminPin")},"🔐 Change Admin PIN")
           )
         ),
+        isAdmin&&h("div",{className:"card"},
+          h("div",{className:"lbl"},"// data management"),
+          h("p",{style:{fontSize:12,color:"#555",marginBottom:16,lineHeight:1.7}},"Clear drill history permanently. This cannot be undone."),
+          modal==="clearHistoryConfirm"
+            ? h("div",{style:{background:"rgba(239,68,68,0.08)",border:"1px solid rgba(239,68,68,0.2)",borderRadius:12,padding:"16px",marginBottom:0}},
+                h("p",{style:{fontSize:13,color:"#f0ede8",marginBottom:14,fontWeight:700}},"⚠️ Are you sure? This will permanently delete all "+( shared.history||[]).length+" drill record(s)."),
+                h("div",{style:{display:"flex",gap:8}},
+                  h("button",{className:"btn-secondary",style:{flex:1},onClick:closeModal},"Cancel"),
+                  h("button",{className:"btn-primary",style:{flex:1,background:"#ef4444"},onClick:async()=>{
+                    const s=await dbRead();
+                    const next={...s,history:[]};
+                    setShared(prev=>({...prev,history:[]}));
+                    await dbWrite(next);
+                    closeModal();
+                    showToast("🗑️ Drill history cleared");
+                  }},"Yes, Delete All History")
+                )
+              )
+            : h("button",{className:"cbtn",style:{borderColor:"#ef4444",color:"#ef4444"},onClick:()=>setModal("clearHistoryConfirm")},
+                "🗑️ Clear Drill History"+(( shared.history||[]).length>0?" ("+( shared.history||[]).length+" records)":"")
+              )
+        ),
         h("div",{className:"card"},
           h("div",{className:"lbl"},"// access levels"),
           h("p",{style:{fontSize:12,color:"#555",lineHeight:1.7}},"🔐 Admin PIN — manages phone book, settings, changes PINs"),
